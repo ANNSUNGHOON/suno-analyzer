@@ -100,7 +100,7 @@ async def evaluate_with_claude(original_prompt: str, gemini_report: str) -> dict
     
     message = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1000,
+        max_tokens=4000,
         messages=[{
             "role": "user",
             "content": CLAUDE_EVALUATION_PROMPT.format(
