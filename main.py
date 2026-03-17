@@ -311,16 +311,46 @@ async def analyze_url(
 ):
     """Analyze Suno song by URL."""
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-            song_id = url.rstrip("/").split("/")[-1]
-            audio_url = f"https://cdn1.suno.ai/{song_id}.mp3"
-            r = await client.get(audio_url)
-            if r.status_code != 200:
-                audio_url = f"https://cdn2.suno.ai/{song_id}.mp3"
-                r = await client.get(audio_url)
-            if r.status_code != 200:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }) as client:
+            audio_bytes = None
+
+            # Try to extract clip ID from various URL formats
+            # Format 1: https://suno.com/song/UUID
+            # Format 2: https://suno.com/s/SHORTID (share link)
+            # Format 3: https://cdn1.suno.ai/UUID.mp3 (direct CDN)
+
+            raw_id = url.rstrip("/").split("/")[-1].replace(".mp3", "")
+
+            # If it's a share link (/s/xxx), fetch the page to find the real clip ID
+            if "/s/" in url or len(raw_id) < 30:
+                # Fetch the share page and look for clip ID in HTML
+                page = await client.get(url)
+                if page.status_code == 200:
+                    html = page.text
+                    # Look for UUID pattern in the page (clip IDs are UUIDs)
+                    uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+                    uuids = re.findall(uuid_pattern, html)
+                    # Try each UUID as potential clip ID
+                    for uuid in uuids:
+                        test_url = f"https://cdn1.suno.ai/{uuid}.mp3"
+                        r = await client.get(test_url)
+                        if r.status_code == 200 and len(r.content) > 10000:
+                            audio_bytes = r.content
+                            break
+
+            # If not found via page parsing, try direct CDN with the ID
+            if audio_bytes is None:
+                for cdn in ["cdn1", "cdn2"]:
+                    test_url = f"https://{cdn}.suno.ai/{raw_id}.mp3"
+                    r = await client.get(test_url)
+                    if r.status_code == 200 and len(r.content) > 10000:
+                        audio_bytes = r.content
+                        break
+
+            if audio_bytes is None:
                 raise HTTPException(400, "Could not download audio from Suno URL. Please upload mp3 directly.")
-            audio_bytes = r.content
     except HTTPException:
         raise
     except Exception as e:
