@@ -85,7 +85,7 @@ async def save_to_supabase(data: dict):
 
 async def analyze_with_gemini(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
     """Send audio to Gemini for analysis."""
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel("gemini-3.1-pro-preview")
     
     response = model.generate_content([
         GEMINI_ANALYSIS_PROMPT,
