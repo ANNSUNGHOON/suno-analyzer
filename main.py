@@ -349,7 +349,6 @@ async def run_gpt4o(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
     client = OpenAI(api_key=OPENAI_KEY)
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
-    # Map mime type to format
     fmt = "mp3"
     if "wav" in mime_type:
         fmt = "wav"
@@ -358,7 +357,6 @@ async def run_gpt4o(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
 
     response = client.chat.completions.create(
         model="gpt-4o-audio-preview",
-        modalities=["text"],
         messages=[{
             "role": "user",
             "content": [
