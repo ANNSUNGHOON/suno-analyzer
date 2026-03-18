@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import anthropic
+from openai import OpenAI
 import httpx
 import json
 import os
@@ -9,8 +10,9 @@ import tempfile
 import re
 import numpy as np
 import asyncio
+import base64
 
-app = FastAPI(title="Suno Audio Analyzer v3 — Triple Engine")
+app = FastAPI(title="Suno Audio Analyzer v4 — Quad Engine")
 
 MAX_CONCURRENT = 2
 analysis_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
@@ -24,6 +26,7 @@ app.add_middleware(
 
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://jgfvwfalxnrdujaoqoiq.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -243,6 +246,22 @@ Respond ONLY in valid JSON format with NO other text:
   "dynamics_description": "energy flow, tension/release patterns, build-ups and drops"
 }"""
 
+GPT4O_ANALYSIS_PROMPT = """You are an expert music production analyst with deep knowledge of electronic music, hip-hop, jazz, rock, and world music sub-genres. Analyze this audio file.
+Focus ONLY on qualities that require expert human-like listening judgment.
+Do NOT estimate BPM, key, or any numerical measurements — those are handled by separate precision tools.
+
+Respond ONLY in valid JSON format with NO other text:
+{
+  "genre": "detected genre(s) and sub-genres — be as specific as possible (e.g. 'dark electro house' not just 'electronic')",
+  "instruments": ["list", "of", "every", "detected", "instrument", "and", "sound_source"],
+  "mood": "overall mood/atmosphere — use production-specific vocabulary",
+  "structure": "song structure with approximate timestamps",
+  "production_notes": "mixing quality, distortion level, compression character, reverb type, sound design details",
+  "vocal_type": "vocal characteristics if present, or 'instrumental'",
+  "stereo_field": "stereo width, panning techniques, spatial effects",
+  "dynamics_description": "energy flow, tension/release, transient character, sidechain behavior"
+}"""
+
 
 # ════════════════════════════════════════
 # CLAUDE OPUS: Final Evaluation
@@ -253,7 +272,7 @@ CLAUDE_EVALUATION_PROMPT = """You are evaluating how accurately an AI music gene
 ORIGINAL PROMPT given to Suno:
 {prompt}
 
-═══ ANALYSIS DATA FROM 3 INDEPENDENT ENGINES ═══
+═══ ANALYSIS DATA FROM 4 INDEPENDENT ENGINES ═══
 
 ENGINE 1 — LIBROSA (mathematically precise measurements):
 {librosa_data}
@@ -261,19 +280,23 @@ ENGINE 1 — LIBROSA (mathematically precise measurements):
 ENGINE 2 — ESSENTIA (ML-based music classification):
 {essentia_data}
 
-ENGINE 3 — GEMINI AI (subjective listening analysis):
+ENGINE 3 — GEMINI 3.1 PRO (AI subjective listening analysis #1):
 {gemini_data}
+
+ENGINE 4 — GPT-4o AUDIO (AI subjective listening analysis #2):
+{gpt4o_data}
 
 ═══ EVALUATION INSTRUCTIONS ═══
 
 For BPM accuracy: Use LIBROSA's BPM as primary, cross-check with ESSENTIA's BPM.
 For Key accuracy: Use LIBROSA's key as primary, cross-check with ESSENTIA's key.
-For Genre accuracy: Use ESSENTIA's classification as primary, cross-check with GEMINI.
-For Mood accuracy: Compare ESSENTIA's danceability/energy/dissonance with GEMINI's mood description.
-For Instrument accuracy: Use GEMINI's instrument list (it can hear individual instruments).
-For Structure accuracy: Use GEMINI's structure description.
+For Genre accuracy: Cross-reference GEMINI and GPT-4o genre classifications. Where they agree, high confidence. Where they disagree, use ESSENTIA as tiebreaker.
+For Mood accuracy: Compare ESSENTIA's danceability/energy/dissonance with BOTH Gemini and GPT-4o mood descriptions.
+For Instrument accuracy: Cross-reference GEMINI and GPT-4o instrument lists. Instruments detected by both have high confidence.
+For Structure accuracy: Cross-reference GEMINI and GPT-4o structure descriptions.
+For Production quality: Cross-reference GEMINI and GPT-4o production notes.
 
-Where engines disagree, note the disagreement and use your judgment on which is more reliable.
+Where engines disagree, note the disagreement and explain which you trust more and why.
 
 Respond ONLY in valid JSON:
 {{
@@ -286,7 +309,9 @@ Respond ONLY in valid JSON:
   "overall_score": <1.0-10.0>,
   "engine_cross_check": {{
     "bpm_agreement": "librosa X vs essentia Y — agree/disagree",
-    "key_agreement": "librosa X vs essentia Y — agree/disagree"
+    "key_agreement": "librosa X vs essentia Y — agree/disagree",
+    "genre_agreement": "gemini 'X' vs gpt4o 'Y' — agree/disagree",
+    "mood_agreement": "gemini 'X' vs gpt4o 'Y' — agree/disagree"
   }},
   "summary": "Brief explanation of what matched well and what didn't",
   "token_feedback": [
@@ -311,7 +336,7 @@ async def save_to_supabase(data: dict):
 
 
 async def run_gemini(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel("gemini-3.1-pro-preview")
     response = model.generate_content([
         GEMINI_ANALYSIS_PROMPT,
         {"mime_type": mime_type, "data": audio_bytes}
@@ -319,18 +344,46 @@ async def run_gemini(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
     return response.text
 
 
-async def run_claude(prompt: str, librosa_data: dict, essentia_data: dict, gemini_report: str) -> dict:
+async def run_gpt4o(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
+    """Send audio to GPT-4o Audio for subjective analysis."""
+    client = OpenAI(api_key=OPENAI_KEY)
+    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+    # Map mime type to format
+    fmt = "mp3"
+    if "wav" in mime_type:
+        fmt = "wav"
+    elif "mp4" in mime_type or "m4a" in mime_type:
+        fmt = "mp4"
+
+    response = client.chat.completions.create(
+        model="gpt-4o-audio-preview",
+        modalities=["text"],
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": GPT4O_ANALYSIS_PROMPT},
+                {"type": "input_audio", "input_audio": {"data": audio_b64, "format": fmt}}
+            ]
+        }],
+        max_tokens=2000
+    )
+    return response.choices[0].message.content
+
+
+async def run_claude(prompt: str, librosa_data: dict, essentia_data: dict, gemini_report: str, gpt4o_report: str) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     message = client.messages.create(
         model="claude-opus-4-6",
-        max_tokens=2000,
+        max_tokens=2500,
         messages=[{
             "role": "user",
             "content": CLAUDE_EVALUATION_PROMPT.format(
                 prompt=prompt,
                 librosa_data=json.dumps(librosa_data, indent=2),
                 essentia_data=json.dumps(essentia_data, indent=2),
-                gemini_data=gemini_report
+                gemini_data=gemini_report,
+                gpt4o_data=gpt4o_report
             )
         }]
     )
@@ -351,8 +404,8 @@ async def health():
     return {
         "status": "ok",
         "service": "suno-audio-analyzer",
-        "version": "3.0-triple-engine",
-        "engines": ["librosa", "essentia", "gemini"],
+        "version": "4.0-quad-engine",
+        "engines": ["librosa", "essentia", "gemini-3.1-pro", "gpt-4o-audio"],
         "evaluator": "claude-opus-4-6",
         "active_analyses": MAX_CONCURRENT - analysis_semaphore._value,
         "max_concurrent": MAX_CONCURRENT
@@ -367,7 +420,7 @@ async def analyze_upload(
     prompt_id: int = Form(None),
     ip: str = Form("unknown")
 ):
-    """Triple-engine analysis: librosa + Essentia + Gemini → Claude Opus evaluation."""
+    """Quad-engine analysis: librosa + Essentia + Gemini 3.1 Pro + GPT-4o Audio → Claude Opus evaluation."""
     if not file.content_type or "audio" not in file.content_type:
         raise HTTPException(400, "File must be an audio file (mp3, wav, etc.)")
 
@@ -389,16 +442,23 @@ async def analyze_upload(
             except Exception as e:
                 essentia_result = {"engine": "essentia", "error": str(e)}
 
-            # ── Engine 3: Gemini ──
+            # ── Engine 3: Gemini 3.1 Pro ──
             try:
                 gemini_raw = await run_gemini(audio_bytes, file.content_type)
                 gemini_report = extract_json(gemini_raw)
             except Exception as e:
                 gemini_report = json.dumps({"engine": "gemini", "error": str(e)})
 
-            # ── Evaluator: Claude Opus ──
+            # ── Engine 4: GPT-4o Audio ──
             try:
-                claude_eval = await run_claude(prompt, librosa_result, essentia_result, gemini_report)
+                gpt4o_raw = await run_gpt4o(audio_bytes, file.content_type)
+                gpt4o_report = extract_json(gpt4o_raw)
+            except Exception as e:
+                gpt4o_report = json.dumps({"engine": "gpt4o", "error": str(e)})
+
+            # ── Evaluator: Claude Opus 4.6 ──
+            try:
+                claude_eval = await run_claude(prompt, librosa_result, essentia_result, gemini_report, gpt4o_report)
             except Exception as e:
                 claude_eval = {
                     "genre_accuracy": None, "bpm_accuracy": None, "key_accuracy": None,
@@ -413,7 +473,8 @@ async def analyze_upload(
             full_report = json.dumps({
                 "librosa": librosa_result,
                 "essentia": essentia_result,
-                "gemini": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report
+                "gemini": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report,
+                "gpt4o": json.loads(gpt4o_report) if gpt4o_report.startswith("{") else gpt4o_report
             })
 
             db_result = {
@@ -436,6 +497,7 @@ async def analyze_upload(
                 "librosa": librosa_result,
                 "essentia": essentia_result,
                 "gemini": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report,
+                "gpt4o": json.loads(gpt4o_report) if gpt4o_report.startswith("{") else gpt4o_report,
                 "evaluation": claude_eval,
                 "saved": True
             }
