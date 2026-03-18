@@ -289,12 +289,28 @@ ENGINE 4 — GPT-4o AUDIO (AI subjective listening analysis #2):
 ═══ EVALUATION INSTRUCTIONS ═══
 
 For BPM accuracy: Use LIBROSA's BPM as primary, cross-check with ESSENTIA's BPM.
-For Key accuracy: Use LIBROSA's key as primary, cross-check with ESSENTIA's key.
+For Key accuracy: Use LIBROSA's key as primary, cross-check with ESSENTIA's key. Note enharmonic equivalents (D#=Eb, etc).
 For Genre accuracy: Cross-reference GEMINI and GPT-4o genre classifications. Where they agree, high confidence. Where they disagree, use ESSENTIA as tiebreaker.
 For Mood accuracy: Compare ESSENTIA's danceability/energy/dissonance with BOTH Gemini and GPT-4o mood descriptions.
 For Instrument accuracy: Cross-reference GEMINI and GPT-4o instrument lists. Instruments detected by both have high confidence.
 For Structure accuracy: Cross-reference GEMINI and GPT-4o structure descriptions.
 For Production quality: Cross-reference GEMINI and GPT-4o production notes.
+
+═══ ENGINE RELIABILITY WEIGHTING ═══
+
+IMPORTANT: Gemini 3.1 Pro tends to be MORE detailed and MORE accurate at genre/sub-genre classification and mood detection than GPT-4o Audio. GPT-4o Audio tends to under-classify genres (e.g. calling "doom metal" just "post-rock") and use milder mood vocabulary (e.g. "introspective" instead of "dark, crushing"). When Gemini and GPT-4o disagree on genre or mood:
+- Give Gemini's classification ~70% weight and GPT-4o ~30% weight
+- Do NOT let GPT-4o's weaker genre/mood judgment drag down scores excessively
+- GPT-4o's value is in CONFIRMING or CONTRADICTING Gemini, not overriding it
+
+═══ PROMPT CONFLICT ANALYSIS ═══
+
+CRITICAL: Before scoring, analyze the original prompt for INTERNAL CONTRADICTIONS between tokens. Suno has a priority hierarchy:
+1. Genre archetype energy > explicit BPM (e.g. "trailer music" implies 120+ BPM, overriding "85 BPM")
+2. Energy tokens > mood tokens (e.g. "energetic" overrides "gentle")
+3. Mainstream genre template > specific sub-genre request (e.g. "Latin" → salsa, ignoring "bossa nova")
+
+If the prompt contains conflicting tokens, note this in your summary. The failure may be a PROMPT CONFLICT rather than Suno ignoring the token. Include a "prompt_conflicts" field identifying any detected conflicts.
 
 Where engines disagree, note the disagreement and explain which you trust more and why.
 
@@ -313,7 +329,10 @@ Respond ONLY in valid JSON:
     "genre_agreement": "gemini 'X' vs gpt4o 'Y' — agree/disagree",
     "mood_agreement": "gemini 'X' vs gpt4o 'Y' — agree/disagree"
   }},
-  "summary": "Brief explanation of what matched well and what didn't",
+  "prompt_conflicts": [
+    {{"conflict": "token A vs token B", "winner": "which token Suno prioritized", "reason": "why"}}
+  ],
+  "summary": "Brief explanation of what matched well and what didn't, including any prompt conflicts detected",
   "token_feedback": [
     {{"token": "specific word from prompt", "effectiveness": "high/medium/low", "reason": "why"}}
   ]
@@ -463,6 +482,7 @@ async def analyze_upload(
                     "instrument_accuracy": None, "mood_accuracy": None,
                     "structure_accuracy": None, "overall_score": None,
                     "engine_cross_check": {},
+                    "prompt_conflicts": [],
                     "summary": f"Claude evaluation failed: {str(e)}",
                     "token_feedback": []
                 }
