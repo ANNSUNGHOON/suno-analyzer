@@ -200,7 +200,7 @@ async def evaluate_with_claude(original_prompt: str, objective_data: dict, subje
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
     message = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-6",
         max_tokens=1500,
         messages=[{
             "role": "user",
@@ -301,106 +301,4 @@ async def analyze_upload(
     }
 
 
-@app.post("/analyze-url")
-async def analyze_url(
-    url: str = Form(...),
-    prompt: str = Form(...),
-    prompt_type: str = Form("style"),
-    prompt_id: int = Form(None),
-    ip: str = Form("unknown")
-):
-    """Analyze Suno song by URL."""
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }) as client:
-            audio_bytes = None
 
-            # Try to extract clip ID from various URL formats
-            # Format 1: https://suno.com/song/UUID
-            # Format 2: https://suno.com/s/SHORTID (share link)
-            # Format 3: https://cdn1.suno.ai/UUID.mp3 (direct CDN)
-
-            raw_id = url.rstrip("/").split("/")[-1].replace(".mp3", "")
-
-            # If it's a share link (/s/xxx), fetch the page to find the real clip ID
-            if "/s/" in url or len(raw_id) < 30:
-                # Fetch the share page and look for clip ID in HTML
-                page = await client.get(url)
-                if page.status_code == 200:
-                    html = page.text
-                    # Look for UUID pattern in the page (clip IDs are UUIDs)
-                    uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-                    uuids = re.findall(uuid_pattern, html)
-                    # Try each UUID as potential clip ID
-                    for uuid in uuids:
-                        test_url = f"https://cdn1.suno.ai/{uuid}.mp3"
-                        r = await client.get(test_url)
-                        if r.status_code == 200 and len(r.content) > 10000:
-                            audio_bytes = r.content
-                            break
-
-            # If not found via page parsing, try direct CDN with the ID
-            if audio_bytes is None:
-                for cdn in ["cdn1", "cdn2"]:
-                    test_url = f"https://{cdn}.suno.ai/{raw_id}.mp3"
-                    r = await client.get(test_url)
-                    if r.status_code == 200 and len(r.content) > 10000:
-                        audio_bytes = r.content
-                        break
-
-            if audio_bytes is None:
-                raise HTTPException(400, "Could not download audio from Suno URL. Please upload mp3 directly.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(400, f"Failed to fetch audio: {str(e)}. Please upload mp3 directly.")
-
-    # Same pipeline
-    try:
-        objective = analyze_audio_objective(audio_bytes)
-    except Exception as e:
-        raise HTTPException(500, f"Audio analysis failed: {str(e)}")
-
-    try:
-        gemini_raw = await analyze_with_gemini(audio_bytes)
-        gemini_report = extract_json(gemini_raw)
-    except Exception as e:
-        gemini_report = json.dumps({"error": f"Gemini analysis failed: {str(e)}"})
-
-    try:
-        claude_eval = await evaluate_with_claude(prompt, objective, gemini_report)
-    except Exception as e:
-        claude_eval = {
-            "genre_accuracy": None, "bpm_accuracy": None, "key_accuracy": None,
-            "instrument_accuracy": None, "mood_accuracy": None,
-            "structure_accuracy": None, "overall_score": None,
-            "summary": f"Claude evaluation failed: {str(e)}",
-            "token_feedback": []
-        }
-
-    full_report = json.dumps({
-        "objective": objective,
-        "subjective": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report
-    })
-
-    result = {
-        "ip": ip, "prompt_id": prompt_id,
-        "original_prompt": prompt, "gemini_report": full_report,
-        "genre_accuracy": claude_eval.get("genre_accuracy"),
-        "bpm_accuracy": claude_eval.get("bpm_accuracy"),
-        "instrument_accuracy": claude_eval.get("instrument_accuracy"),
-        "mood_accuracy": claude_eval.get("mood_accuracy"),
-        "structure_accuracy": claude_eval.get("structure_accuracy"),
-        "overall_score": claude_eval.get("overall_score"),
-        "suno_url": url, "prompt_type": prompt_type
-    }
-
-    await save_to_supabase(result)
-
-    return {
-        "objective_analysis": objective,
-        "subjective_analysis": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report,
-        "evaluation": claude_eval,
-        "saved": True
-    }
