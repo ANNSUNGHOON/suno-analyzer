@@ -415,7 +415,7 @@ async def analyze_upload(
     file: UploadFile = File(...),
     prompt: str = Form(...),
     prompt_type: str = Form("style"),
-    prompt_id: int = Form(None),
+    prompt_id: str = Form(None),
     ip: str = Form("unknown")
 ):
     """Quad-engine analysis: librosa + Essentia + Gemini 3.1 Pro + GPT-4o Audio → Claude Opus evaluation."""
@@ -477,7 +477,7 @@ async def analyze_upload(
 
             db_result = {
                 "ip": ip,
-                "prompt_id": prompt_id,
+                "prompt_id": int(prompt_id) if prompt_id and prompt_id.isdigit() else None,
                 "original_prompt": prompt,
                 "gemini_report": full_report,
                 "genre_accuracy": claude_eval.get("genre_accuracy"),
