@@ -8,8 +8,14 @@ import os
 import tempfile
 import re
 import numpy as np
+import asyncio
 
 app = FastAPI(title="Suno Audio Analyzer")
+
+# Limit concurrent analyses to prevent CPU overload
+MAX_CONCURRENT = 2
+analysis_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+queue_count = 0
 
 app.add_middleware(
     CORSMiddleware,
@@ -227,7 +233,7 @@ def extract_json(text: str) -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "suno-audio-analyzer", "version": "2.0-librosa"}
+    return {"status": "ok", "service": "suno-audio-analyzer", "version": "2.0-librosa", "active_analyses": MAX_CONCURRENT - analysis_semaphore._value, "max_concurrent": MAX_CONCURRENT}
 
 
 @app.post("/analyze")
@@ -246,59 +252,66 @@ async def analyze_upload(
     if len(audio_bytes) > 25 * 1024 * 1024:
         raise HTTPException(400, "File too large. Maximum 25MB.")
 
-    # Step 1: Librosa - objective measurements
+    # Queue if too many concurrent analyses
     try:
-        objective = analyze_audio_objective(audio_bytes)
-    except Exception as e:
-        raise HTTPException(500, f"Audio analysis failed: {str(e)}")
+        acquired = analysis_semaphore.locked()
+        async with analysis_semaphore:
+            # Step 1: Librosa - objective measurements
+            try:
+                objective = analyze_audio_objective(audio_bytes)
+            except Exception as e:
+                raise HTTPException(500, f"Audio analysis failed: {str(e)}")
 
-    # Step 2: Gemini - subjective analysis
-    try:
-        gemini_raw = await analyze_with_gemini(audio_bytes, file.content_type)
-        gemini_report = extract_json(gemini_raw)
-    except Exception as e:
-        gemini_report = json.dumps({"error": f"Gemini analysis failed: {str(e)}"})
+            # Step 2: Gemini - subjective analysis
+            try:
+                gemini_raw = await analyze_with_gemini(audio_bytes, file.content_type)
+                gemini_report = extract_json(gemini_raw)
+            except Exception as e:
+                gemini_report = json.dumps({"error": f"Gemini analysis failed: {str(e)}"})
 
-    # Step 3: Claude - evaluate prompt vs result
-    try:
-        claude_eval = await evaluate_with_claude(prompt, objective, gemini_report)
-    except Exception as e:
-        claude_eval = {
-            "genre_accuracy": None, "bpm_accuracy": None, "key_accuracy": None,
-            "instrument_accuracy": None, "mood_accuracy": None,
-            "structure_accuracy": None, "overall_score": None,
-            "summary": f"Claude evaluation failed: {str(e)}",
-            "token_feedback": []
-        }
+            # Step 3: Claude - evaluate prompt vs result
+            try:
+                claude_eval = await evaluate_with_claude(prompt, objective, gemini_report)
+            except Exception as e:
+                claude_eval = {
+                    "genre_accuracy": None, "bpm_accuracy": None, "key_accuracy": None,
+                    "instrument_accuracy": None, "mood_accuracy": None,
+                    "structure_accuracy": None, "overall_score": None,
+                    "summary": f"Claude evaluation failed: {str(e)}",
+                    "token_feedback": []
+                }
 
-    # Step 4: Save to Supabase
-    full_report = json.dumps({
-        "objective": objective,
-        "subjective": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report
-    })
+            # Step 4: Save to Supabase
+            full_report = json.dumps({
+                "objective": objective,
+                "subjective": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report
+            })
 
-    result = {
-        "ip": ip,
-        "prompt_id": prompt_id,
-        "original_prompt": prompt,
-        "gemini_report": full_report,
-        "genre_accuracy": claude_eval.get("genre_accuracy"),
-        "bpm_accuracy": claude_eval.get("bpm_accuracy"),
-        "instrument_accuracy": claude_eval.get("instrument_accuracy"),
-        "mood_accuracy": claude_eval.get("mood_accuracy"),
-        "structure_accuracy": claude_eval.get("structure_accuracy"),
-        "overall_score": claude_eval.get("overall_score"),
-        "prompt_type": prompt_type
-    }
+            result = {
+                "ip": ip,
+                "prompt_id": prompt_id,
+                "original_prompt": prompt,
+                "gemini_report": full_report,
+                "genre_accuracy": claude_eval.get("genre_accuracy"),
+                "bpm_accuracy": claude_eval.get("bpm_accuracy"),
+                "instrument_accuracy": claude_eval.get("instrument_accuracy"),
+                "mood_accuracy": claude_eval.get("mood_accuracy"),
+                "structure_accuracy": claude_eval.get("structure_accuracy"),
+                "overall_score": claude_eval.get("overall_score"),
+                "prompt_type": prompt_type
+            }
 
-    await save_to_supabase(result)
+            await save_to_supabase(result)
 
-    return {
-        "objective_analysis": objective,
-        "subjective_analysis": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report,
-        "evaluation": claude_eval,
-        "saved": True
-    }
+            return {
+                "objective_analysis": objective,
+                "subjective_analysis": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report,
+                "evaluation": claude_eval,
+                "queued": acquired,
+                "saved": True
+            }
+    except asyncio.TimeoutError:
+        raise HTTPException(503, "Server busy. Please try again in a moment.")
 
 
 
