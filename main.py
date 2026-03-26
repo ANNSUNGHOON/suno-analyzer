@@ -33,7 +33,7 @@ ADMIN_KEY = os.getenv("ADMIN_KEY", "")  # Set this in Railway env vars
 
 # Model config — easy to swap
 GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
-GEMINI_FLASH_MODEL = "gemini-2.5-flash"  # Stable
+GEMINI_FLASH_MODEL = "gemini-2.5-flash-preview-04-17"  # Lite tier
 
 # Quality threshold for re-eval recommendation
 REEVAL_SCORE_THRESHOLD = 6.0
@@ -216,6 +216,280 @@ def analyze_with_essentia(audio_bytes: bytes) -> dict:
         return {"engine": "essentia", "error": str(e)}
     finally:
         os.unlink(tmp_path)
+
+
+# ════════════════════════════════════════
+# ENGINE: CLAP — Prompt↔Audio Direct Alignment
+# ════════════════════════════════════════
+_clap_model = None
+
+def _load_clap():
+    """Lazy-load LAION-CLAP model (first call downloads ~600MB checkpoint)."""
+    global _clap_model
+    if _clap_model is None:
+        import laion_clap
+        _clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel='HTSAT-base')
+        _clap_model.load_ckpt()
+        print("[INFO] CLAP model loaded successfully")
+    return _clap_model
+
+
+def get_clap_alignment(audio_bytes: bytes, text_prompt: str) -> dict:
+    """CLAP: Compute text↔audio cosine similarity in shared embedding space."""
+    import torch
+    import librosa as lr
+
+    try:
+        model = _load_clap()
+    except Exception as e:
+        return {"engine": "clap", "error": f"Model load failed: {e}"}
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        # CLAP needs 48kHz mono
+        y, _ = lr.load(tmp_path, sr=48000, mono=True)
+        audio_data = y.reshape(1, -1)
+
+        with torch.no_grad():
+            audio_embed = model.get_audio_embedding_from_data(audio_data, use_tensor=True)
+            text_embed = model.get_text_embedding([text_prompt], use_tensor=True)
+
+        sim = float(torch.nn.functional.cosine_similarity(audio_embed, text_embed, dim=1)[0])
+
+        return {
+            "engine": "clap",
+            "cosine_similarity": round(sim, 4),
+            "alignment_score_10": round(max(0.0, min(1.0, sim)) * 10, 1),
+        }
+    except Exception as e:
+        return {"engine": "clap", "error": str(e)}
+    finally:
+        os.unlink(tmp_path)
+
+
+# ════════════════════════════════════════
+# CLAP MUSIC TAGGER — Zero-shot MTT vocabulary (MusiCNN functional equivalent)
+# ════════════════════════════════════════
+# MagnaTagATune 50-tag vocabulary (same as MusiCNN MTT model)
+MTT_TAGS = [
+    "guitar", "classical", "slow", "techno", "strings", "drums", "electronic",
+    "rock", "fast", "piano", "ambient", "beat", "violin", "vocal", "synth",
+    "female vocal", "indian", "opera", "male vocal", "singing", "no vocals",
+    "harpsichord", "loud", "quiet", "flute", "choir", "jazz", "metal", "country",
+    "dance", "new age", "hip hop", "smooth", "cello", "orchestral", "heavy",
+    "reggae", "light", "funk", "folk", "bass", "trumpet", "saxophone",
+    "keyboard", "acoustic", "pop", "soft", "energetic", "dark", "upbeat",
+]
+
+
+def score_clap_music_tagger(audio_bytes: bytes, prompt: str) -> dict:
+    """Zero-shot music tagging via CLAP + MTT vocabulary. MusiCNN functional equivalent.
+    Audio embed once → cosine sim against 50 fixed music tags → top tags → prompt match score.
+    """
+    import torch
+    import torch.nn.functional as F
+    import librosa as lr
+
+    try:
+        model = _load_clap()
+    except Exception as e:
+        return {"engine": "clap_tagger", "error": f"Model load failed: {e}"}
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        y, _ = lr.load(tmp_path, sr=48000, mono=True)
+        audio_data = y.reshape(1, -1)
+
+        with torch.no_grad():
+            audio_embed = model.get_audio_embedding_from_data(audio_data, use_tensor=True)  # [1, 512]
+            text_embeds = model.get_text_embedding(MTT_TAGS, use_tensor=True)               # [N, 512]
+            sims = F.cosine_similarity(audio_embed.expand(len(MTT_TAGS), -1), text_embeds, dim=1)
+            sims_np = sims.cpu().numpy()
+
+        # Top tags above threshold
+        top_indices = sims_np.argsort()[::-1][:10]
+        detected = [(MTT_TAGS[i], round(float(sims_np[i]), 3)) for i in top_indices if sims_np[i] > 0.15]
+        detected_names = set(tag for tag, _ in detected)
+
+        # Prompt match score
+        prompt_tokens = [w.strip().lower() for w in re.split(r'[,\s]+', prompt) if len(w.strip()) > 2]
+        if not prompt_tokens:
+            tag_match_score = 0.0
+        else:
+            matches = sum(1 for tok in prompt_tokens
+                          if any(tok in tag or tag in tok for tag in detected_names))
+            tag_match_score = round(min(10.0, (matches / len(prompt_tokens)) * 15), 1)
+
+        return {
+            "engine": "clap_tagger",
+            "top_tags": detected[:5],
+            "tag_match_score": tag_match_score,
+        }
+    except Exception as e:
+        return {"engine": "clap_tagger", "error": str(e)}
+    finally:
+        os.unlink(tmp_path)
+
+
+# ════════════════════════════════════════
+# GEMINI FLASH TAG MATCH — Music tag keyword scoring
+# ════════════════════════════════════════
+def score_gemini_tag_match(prompt: str, flash_report: dict) -> float:
+    """Score how well Gemini Flash's music tags match the original prompt keywords."""
+    if not flash_report or flash_report.get("error"):
+        return 0.0
+    # Collect all detected tags: genre, mood, instruments, vocal, production
+    detected_tokens = set()
+    for field in ["genre", "mood", "vocal_type", "production_style", "energy_level", "tempo_feel"]:
+        val = flash_report.get(field, "") or ""
+        for tok in re.split(r'[,\s/\-]+', val.lower()):
+            if len(tok) > 2:
+                detected_tokens.add(tok)
+    instruments = flash_report.get("instruments", []) or []
+    for inst in instruments:
+        for tok in re.split(r'[,\s]+', inst.lower()):
+            if len(tok) > 2:
+                detected_tokens.add(tok)
+
+    # Prompt keywords
+    prompt_tokens = [w.strip().lower() for w in re.split(r'[,\s]+', prompt) if len(w.strip()) > 3]
+    if not prompt_tokens:
+        return 0.0
+    matches = sum(1 for tok in prompt_tokens if any(tok in dt or dt in tok for dt in detected_tokens))
+    return round(min(10.0, (matches / len(prompt_tokens)) * 15), 1)
+
+
+# ════════════════════════════════════════
+# ENGINE: M2D — Music Audio Embedding (NTT Labs / HuggingFace)
+# ════════════════════════════════════════
+_m2d_model = None
+_m2d_processor = None
+
+def _load_m2d():
+    """Lazy-load M2D model from HuggingFace (music-specific ViT, ~300MB)."""
+    global _m2d_model, _m2d_processor
+    if _m2d_model is None:
+        import torch
+        from transformers import AutoModel, AutoFeatureExtractor
+        repo_id = "nttcslab-exp-010k/m2d_vit_base-80x608p16x16-221006-mr7"
+        _m2d_processor = AutoFeatureExtractor.from_pretrained(repo_id, trust_remote_code=True)
+        _m2d_model = AutoModel.from_pretrained(repo_id, trust_remote_code=True)
+        _m2d_model.eval()
+        print("[INFO] M2D model loaded successfully")
+    return _m2d_model, _m2d_processor
+
+
+def extract_m2d_embedding(audio_bytes: bytes) -> dict:
+    """M2D: Extract 768-dim music audio embedding for cross-audio comparison."""
+    import librosa as lr
+    import torch
+
+    try:
+        model, processor = _load_m2d()
+    except Exception as e:
+        return {"engine": "m2d", "error": f"Model load failed: {e}"}
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        y, _ = lr.load(tmp_path, sr=16000, mono=True)
+        inputs = processor(y, sampling_rate=16000, return_tensors="pt")
+        with torch.no_grad():
+            outputs = model(**inputs)
+        embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy().tolist()
+        return {
+            "engine": "m2d",
+            "embedding_dim": len(embedding),
+            "embedding": embedding,
+        }
+    except Exception as e:
+        return {"engine": "m2d", "error": str(e)}
+    finally:
+        os.unlink(tmp_path)
+
+
+# ════════════════════════════════════════
+# Gemini Embedding 2 — Text Embedding (upgraded)
+# ════════════════════════════════════════
+def _get_embedding_v2(text: str) -> list:
+    """Get text embedding via Gemini Embedding 2 REST API (3072-dim, 8K context)."""
+    if not text or not text.strip():
+        return []
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-exp-03-07:embedContent"
+        payload = {
+            "model": "models/gemini-embedding-exp-03-07",
+            "content": {"parts": [{"text": text.strip()}]}
+        }
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(url, json=payload, params={"key": GEMINI_KEY})
+            resp.raise_for_status()
+            return resp.json()["embedding"]["values"]
+    except Exception as e:
+        print(f"[WARN] Embedding v2 failed: {type(e).__name__}: {e}")
+        return []
+
+
+def _embedding_cosine_sim(vec_a: list, vec_b: list) -> float:
+    """Cosine similarity between two embedding vectors."""
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    a, b = np.array(vec_a), np.array(vec_b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(np.dot(a, b) / norm) if norm > 0 else 0.0
+
+
+# ════════════════════════════════════════
+# PROMPT PARSING HELPERS
+# ════════════════════════════════════════
+def _extract_bpm_from_prompt(prompt: str):
+    """Extract BPM number from prompt text."""
+    m = re.search(r'(\d{2,3})\s*bpm', prompt.lower())
+    return int(m.group(1)) if m else None
+
+
+def _extract_key_from_prompt(prompt: str):
+    """Extract musical key from prompt text."""
+    m = re.search(r'\b([A-G][#b]?)\s*(major|minor|maj|min)\b', prompt, re.IGNORECASE)
+    if m:
+        key = m.group(1)
+        scale = "minor" if m.group(2).lower().startswith("min") else "major"
+        return f"{key} {scale}"
+    return None
+
+
+def _calc_bpm_fidelity(target: int, detected: float) -> float:
+    """BPM fidelity score (0-10), handles half/double BPM detection."""
+    if not target or not detected:
+        return 0.0
+    ratio = min(target, detected) / max(target, detected)
+    ratio_half = min(target, detected * 2) / max(target, detected * 2) if detected > 0 else 0
+    ratio_dbl = min(target * 2, detected) / max(target * 2, detected) if target > 0 else 0
+    return round(max(ratio, ratio_half, ratio_dbl) * 10, 1)
+
+
+def _calc_key_fidelity(target: str, detected: str) -> float:
+    """Key fidelity score (0-10)."""
+    if not target or not detected:
+        return 0.0
+    if target.lower() == detected.lower():
+        return 10.0
+    # Same root, different mode = partial credit
+    t_root = target.split()[0] if target else ""
+    d_root = detected.split()[0] if detected else ""
+    if t_root.lower() == d_root.lower():
+        return 7.0
+    # Enharmonic equivalents
+    enharmonic = {"C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb"}
+    enharmonic.update({v: k for k, v in enharmonic.items()})
+    if enharmonic.get(t_root, "") == d_root:
+        return 10.0
+    return 0.0
 
 
 # ════════════════════════════════════════
@@ -439,15 +713,19 @@ async def run_gemini_flash(audio_bytes: bytes, mime_type: str = "audio/mpeg") ->
 
 
 async def run_reverse_prompt(librosa_data: dict, essentia_data: dict, gemini_flash_data: str) -> dict:
-    """Predict Suno prompt from audio analysis using Gemini Flash."""
-    model = genai.GenerativeModel(GEMINI_FLASH_MODEL)
+    """Predict Suno prompt from audio analysis using Claude Sonnet 4.6."""
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     prompt_text = REVERSE_PROMPT_TEMPLATE.format(
         librosa_data=json.dumps(librosa_data, indent=2),
         essentia_data=json.dumps(essentia_data, indent=2),
         gemini_data=gemini_flash_data
     )
-    response = model.generate_content(prompt_text)
-    raw = extract_json(response.text)
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt_text}]
+    )
+    raw = extract_json(response.content[0].text)
     try:
         return json.loads(raw)
     except:
@@ -535,11 +813,12 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
     """
     score = 0.0
 
-    # -- AXIS 1: Continuous value scoring (max ~5.0) --
+    # ── AXIS 1: Continuous value scoring (max ~5.0) ──
 
     # librosa: BPM presence + duration quality (max 1.5)
     if librosa_data.get("bpm") and librosa_data["bpm"] > 0:
         score += 0.5
+        # Longer tracks = more reliable analysis
         dur = librosa_data.get("duration_seconds", 0)
         if dur > 120:
             score += 0.5
@@ -547,6 +826,7 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
             score += 0.3
         elif dur > 30:
             score += 0.1
+        # Dynamic range: wider = more interesting signal
         dr = librosa_data.get("dynamic_range_db", 0)
         if dr > 15:
             score += 0.5
@@ -557,31 +837,32 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
 
     # essentia: key strength proportional (max 1.5)
     ks = essentia_data.get("key_strength", 0) or 0
-    score += min(ks, 1.0) * 1.0
+    score += min(ks, 1.0) * 1.0  # 0~1.0 proportional
     if essentia_data.get("danceability") is not None and not essentia_data.get("error"):
         score += 0.5
 
     # gemini confidence proportional (max 2.0)
     if isinstance(gemini_flash, dict) and not gemini_flash.get("error"):
         conf = gemini_flash.get("analysis_confidence", 0) or 0
-        score += min(conf / 10.0, 1.0) * 2.0
+        score += min(conf / 10.0, 1.0) * 2.0  # conf 7→1.4, 8→1.6, 9→1.8, 10→2.0
 
-    # -- AXIS 2: Cross-engine validation (max +2.0, with penalties) --
+    # ── AXIS 2: Cross-engine validation (max +2.0, with penalties) ──
 
     # BPM agreement: librosa vs essentia
     bpm_l = librosa_data.get("bpm", 0) or 0
     bpm_e = essentia_data.get("bpm", 0) or 0
     if bpm_l > 0 and bpm_e > 0:
         bpm_ratio = min(bpm_l, bpm_e) / max(bpm_l, bpm_e)
+        # Also check double/half BPM (common detection discrepancy)
         bpm_ratio_half = min(bpm_l, bpm_e * 2) / max(bpm_l, bpm_e * 2) if bpm_e > 0 else 0
         bpm_ratio_dbl = min(bpm_l * 2, bpm_e) / max(bpm_l * 2, bpm_e) if bpm_l > 0 else 0
         best_ratio = max(bpm_ratio, bpm_ratio_half, bpm_ratio_dbl)
         if best_ratio > 0.95:
-            score += 1.0
+            score += 1.0  # Near-perfect agreement
         elif best_ratio > 0.85:
-            score += 0.5
+            score += 0.5  # Close enough
         else:
-            score -= 0.5
+            score -= 0.5  # Significant disagreement = penalty
 
     # Key agreement: librosa vs essentia
     key_l = librosa_data.get("key", "")
@@ -589,6 +870,7 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
     scale_l = librosa_data.get("scale", "")
     scale_e = essentia_data.get("scale", "")
     if key_l and key_e:
+        # Relative major/minor pairs (C major ↔ A minor, etc.)
         relative_pairs = {
             "C": "A", "G": "E", "D": "B", "A": "F#", "E": "C#", "B": "G#",
             "F": "D", "Bb": "G", "Eb": "C", "Ab": "F", "Db": "Bb", "Gb": "Eb",
@@ -597,18 +879,19 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
         same_key = (key_l == key_e)
         relative_match = False
         if not same_key:
+            # Check relative major/minor relationship
             if scale_l == "major" and scale_e == "minor":
                 relative_match = relative_pairs.get(key_l) == key_e
             elif scale_l == "minor" and scale_e == "major":
                 relative_match = relative_pairs.get(key_e) == key_l
         if same_key and scale_l == scale_e:
-            score += 1.0
+            score += 1.0  # Exact match
         elif same_key or relative_match:
-            score += 0.5
+            score += 0.5  # Partial match (same root or relative key)
         else:
-            score -= 0.3
+            score -= 0.3  # Key disagreement = mild penalty
 
-    # -- AXIS 3: Gemini analysis depth (max +3.0) --
+    # ── AXIS 3: Gemini analysis depth (max +3.0) ──
 
     if isinstance(gemini_flash, dict) and not gemini_flash.get("error"):
         genre_str = gemini_flash.get("genre", "") or ""
@@ -617,7 +900,7 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
         vocal = gemini_flash.get("vocal_type", "") or ""
         prod = gemini_flash.get("production_style", "") or ""
 
-        # Genre specificity (max 1.0)
+        # Genre specificity: multi-word/fusion genres score higher (max 1.0)
         genre_tokens = [t.strip() for t in genre_str.replace("/", ",").replace("-", " ").split(",") if t.strip()]
         if len(genre_tokens) >= 3:
             score += 1.0
@@ -635,7 +918,7 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
         elif n_inst == 1:
             score += 0.2
 
-        # Analysis completeness: vocal + production + mood (max 1.0)
+        # Analysis completeness: vocal + production + mood all present (max 1.0)
         completeness = sum([
             1 if vocal and vocal.lower() not in ["none", "n/a", ""] else 0,
             1 if prod and prod.lower() not in ["unknown", ""] else 0,
@@ -644,224 +927,6 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
         score += completeness / 3.0 * 1.0
 
     return round(max(0.0, min(score, 10.0)), 1)
-
-
-# ════════════════════════════════════════
-# FIDELITY COMPARE ENGINE
-# Original audio analysis vs Suno reproduction analysis
-# ════════════════════════════════════════
-
-
-# --- Embedding-based text similarity (Gemini Embedding API) ---
-
-def _get_embedding(text: str) -> list:
-    """Get embedding vector from Gemini Embedding API."""
-    if not text or not text.strip():
-        return []
-    try:
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=text.strip()
-        )
-        return result["embedding"]
-    except Exception as e:
-        print(f"[WARN] Embedding failed: {e}")
-        return []
-
-
-def _cosine_similarity(a: list, b: list) -> float:
-    """Cosine similarity between two vectors."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    a_arr = np.array(a, dtype=float)
-    b_arr = np.array(b, dtype=float)
-    dot = np.dot(a_arr, b_arr)
-    norm = np.linalg.norm(a_arr) * np.linalg.norm(b_arr)
-    if norm == 0:
-        return 0.0
-    return float(dot / norm)
-
-
-def _embedding_similarity(text_a: str, text_b: str) -> float:
-    """Semantic similarity using Gemini embeddings. Falls back to Jaccard on failure."""
-    emb_a = _get_embedding(text_a)
-    emb_b = _get_embedding(text_b)
-    if emb_a and emb_b:
-        sim = _cosine_similarity(emb_a, emb_b)
-        # Cosine sim range for text embeddings is typically 0.3~1.0
-        # Normalize to 0~1: anything below 0.5 = 0, above 0.9 = 1
-        normalized = max(0.0, min(1.0, (sim - 0.5) / 0.4))
-        return normalized
-    # Fallback to Jaccard if embedding fails
-    return _text_overlap(text_a, text_b)
-
-def _text_overlap(a: str, b: str) -> float:
-    """Jaccard similarity of comma-separated keyword sets."""
-    if not a or not b:
-        return 0.0
-    set_a = {t.strip().lower() for t in a.replace("/", ",").split(",") if t.strip()}
-    set_b = {t.strip().lower() for t in b.replace("/", ",").split(",") if t.strip()}
-    if not set_a or not set_b:
-        return 0.0
-    return len(set_a & set_b) / len(set_a | set_b)
-
-
-def _list_overlap(a: list, b: list) -> float:
-    """Jaccard similarity of two string lists."""
-    if not a or not b:
-        return 0.0
-    set_a = {x.strip().lower() for x in a if isinstance(x, str)}
-    set_b = {x.strip().lower() for x in b if isinstance(x, str)}
-    if not set_a or not set_b:
-        return 0.0
-    return len(set_a & set_b) / len(set_a | set_b)
-
-
-def _ratio_similarity(v1: float, v2: float) -> float:
-    """0-1 similarity based on ratio of two positive values."""
-    if v1 <= 0 or v2 <= 0:
-        return 0.0
-    return min(v1, v2) / max(v1, v2)
-
-
-def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
-    """
-    Compare original audio analysis vs Suno reproduction analysis.
-    Returns per-dimension fidelity (0-1) and weighted overall score (0-10).
-    
-    Both inputs should have: librosa, essentia, gemini_flash dicts.
-    """
-    orig_lib = original.get("librosa", {})
-    orig_ess = original.get("essentia", {})
-    orig_gem = original.get("gemini_flash", {})
-    
-    repr_lib = reproduction.get("librosa", {})
-    repr_ess = reproduction.get("essentia", {})
-    repr_gem = reproduction.get("gemini_flash", {})
-    
-    dims = {}
-    
-    # 1. BPM fidelity — use best match (direct or half/double time)
-    bpm_o = orig_lib.get("bpm", 0) or 0
-    bpm_r = repr_lib.get("bpm", 0) or 0
-    if bpm_o > 0 and bpm_r > 0:
-        ratios = [
-            _ratio_similarity(bpm_o, bpm_r),
-            _ratio_similarity(bpm_o, bpm_r * 2),
-            _ratio_similarity(bpm_o * 2, bpm_r),
-        ]
-        dims["bpm"] = max(ratios)
-    else:
-        dims["bpm"] = 0.0
-    
-    # 2. Key fidelity
-    key_o = orig_ess.get("key", "") or orig_lib.get("key", "")
-    key_r = repr_ess.get("key", "") or repr_lib.get("key", "")
-    scale_o = orig_ess.get("scale", "") or orig_lib.get("scale", "")
-    scale_r = repr_ess.get("scale", "") or repr_lib.get("scale", "")
-    relative_pairs = {
-        "C": "A", "G": "E", "D": "B", "A": "F#", "E": "C#", "B": "G#",
-        "F": "D", "Bb": "G", "Eb": "C", "Ab": "F", "Db": "Bb", "Gb": "Eb",
-        "F#": "D#", "C#": "A#"
-    }
-    if key_o and key_r:
-        if key_o == key_r and scale_o == scale_r:
-            dims["key"] = 1.0
-        elif key_o == key_r:
-            dims["key"] = 0.7
-        elif (scale_o == "major" and relative_pairs.get(key_o) == key_r) or \
-             (scale_r == "major" and relative_pairs.get(key_r) == key_o):
-            dims["key"] = 0.5
-        else:
-            # Check semitone distance (within ±1 semitone = partial match)
-            notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-            alt = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
-            ko = alt.get(key_o, key_o)
-            kr = alt.get(key_r, key_r)
-            if ko in notes and kr in notes:
-                dist = abs(notes.index(ko) - notes.index(kr))
-                dist = min(dist, 12 - dist)
-                dims["key"] = max(0.0, 1.0 - dist * 0.15)
-            else:
-                dims["key"] = 0.0
-    else:
-        dims["key"] = 0.0
-    
-    # 3. Spectral fidelity — compare centroid, bandwidth, rolloff
-    spectral_feats = ["spectral_centroid_hz", "spectral_bandwidth_hz", "spectral_rolloff_hz"]
-    spec_sims = []
-    for feat in spectral_feats:
-        v_o = orig_lib.get(feat, 0) or 0
-        v_r = repr_lib.get(feat, 0) or 0
-        if v_o > 0 and v_r > 0:
-            spec_sims.append(_ratio_similarity(v_o, v_r))
-    dims["spectral"] = sum(spec_sims) / len(spec_sims) if spec_sims else 0.0
-    
-    # 4. Dynamic range fidelity
-    dr_o = orig_lib.get("dynamic_range_db", 0) or 0
-    dr_r = repr_lib.get("dynamic_range_db", 0) or 0
-    dims["dynamics"] = _ratio_similarity(dr_o, dr_r) if dr_o > 0 and dr_r > 0 else 0.0
-    
-    # 5. Energy fidelity — danceability, energy from essentia
-    dance_o = orig_ess.get("danceability", 0) or 0
-    dance_r = repr_ess.get("danceability", 0) or 0
-    dims["energy"] = _ratio_similarity(dance_o, dance_r) if dance_o > 0 and dance_r > 0 else 0.0
-    
-    # 6. Genre fidelity — Gemini genre text overlap
-    genre_o = orig_gem.get("genre", "") if isinstance(orig_gem, dict) else ""
-    genre_r = repr_gem.get("genre", "") if isinstance(repr_gem, dict) else ""
-    dims["genre"] = _embedding_similarity(genre_o, genre_r)
-    
-    # 7. Mood fidelity — Gemini mood text overlap
-    mood_o = orig_gem.get("mood", "") if isinstance(orig_gem, dict) else ""
-    mood_r = repr_gem.get("mood", "") if isinstance(repr_gem, dict) else ""
-    dims["mood"] = _embedding_similarity(mood_o, mood_r)
-    
-    # 8. Instrument fidelity — list overlap
-    inst_o = orig_gem.get("instruments", []) if isinstance(orig_gem, dict) else []
-    inst_r = repr_gem.get("instruments", []) if isinstance(repr_gem, dict) else []
-    # Convert lists to comma-joined text for embedding comparison
-    inst_text_o = ", ".join(inst_o) if isinstance(inst_o, list) else str(inst_o)
-    inst_text_r = ", ".join(inst_r) if isinstance(inst_r, list) else str(inst_r)
-    dims["instruments"] = _embedding_similarity(inst_text_o, inst_text_r)
-    
-    # 9. Vocal type fidelity
-    vocal_o = (orig_gem.get("vocal_type", "") or "").lower() if isinstance(orig_gem, dict) else ""
-    vocal_r = (repr_gem.get("vocal_type", "") or "").lower() if isinstance(repr_gem, dict) else ""
-    if vocal_o and vocal_r:
-        if vocal_o == vocal_r:
-            dims["vocal"] = 1.0
-        else:
-            dims["vocal"] = _embedding_similarity(vocal_o, vocal_r)
-    else:
-        dims["vocal"] = 0.5  # both instrumental = neutral
-    
-    # Weighted overall fidelity (0-10)
-    weights = {
-        "bpm": 1.5, "key": 2.0, "spectral": 1.5, "dynamics": 0.5,
-        "energy": 0.5, "genre": 2.0, "mood": 1.0, "instruments": 1.0, "vocal": 0.5
-    }
-    total_w = sum(weights.values())  # 10.5
-    weighted_sum = sum(dims.get(k, 0) * w for k, w in weights.items())
-    overall = (weighted_sum / total_w) * 10.0
-    
-    # Per-dimension breakdown with letter grades
-    def grade(v):
-        if v >= 0.9: return "A"
-        if v >= 0.7: return "B"
-        if v >= 0.5: return "C"
-        if v >= 0.3: return "D"
-        return "F"
-    
-    breakdown = {k: {"score": round(v, 3), "grade": grade(v)} for k, v in dims.items()}
-    
-    return {
-        "fidelity_score": round(overall, 1),
-        "breakdown": breakdown,
-        "verdict": "high_fidelity" if overall >= 7.0 else "medium_fidelity" if overall >= 4.5 else "low_fidelity",
-        "weakest": min(dims, key=dims.get) if dims else None,
-        "strongest": max(dims, key=dims.get) if dims else None,
-    }
 
 
 # ════════════════════════════════════════
@@ -912,42 +977,25 @@ async def update_supabase(analysis_id: int, updates: dict):
 # ════════════════════════════════════════
 # ENDPOINTS
 # ════════════════════════════════════════
-@app.get("/test-embed")
-async def test_embed():
-    """Debug endpoint: test if Gemini embedding works."""
-    text_a = "progressive house, electronic dance, synth-pop"
-    text_b = "nu-disco, indie dance, electronic pop"
-    try:
-        emb_a = _get_embedding(text_a)
-        emb_b = _get_embedding(text_b)
-        if emb_a and emb_b:
-            sim = _cosine_similarity(emb_a, emb_b)
-            norm = max(0.0, min(1.0, (sim - 0.5) / 0.4))
-            return {"status": "ok", "dim": len(emb_a), "cosine": round(sim, 4), "normalized": round(norm, 4)}
-        else:
-            return {"status": "fail", "error": "empty embeddings", "a_len": len(emb_a), "b_len": len(emb_b)}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "service": "suno-audio-analyzer",
-        "version": "5.2-embedding",
+        "version": "7.1-m2d-clap-tagger",
         "modes": {
             "mode_a": "Prompt + Audio → Quad Engine → Claude Opus evaluation",
-            "mode_b": "Audio only → librosa + Essentia + Gemini Flash → Reverse prompt prediction"
+            "mode_b": "Audio only → librosa + Essentia + Gemini Flash + CLAP tagger → Claude Sonnet reverse prompt",
+            "fidelity": "Prompt + Audio → CLAP + CLAP-tagger(MTT) + M2D + librosa + Essentia + Gemini Flash + Gemini Embedding 2 + Claude Sonnet → Multi-dim fidelity"
         },
         "engines": {
             "lite": ["librosa", "essentia", GEMINI_FLASH_MODEL],
-            "pro": ["librosa", "essentia", GEMINI_PRO_MODEL, "gpt-4o-audio", "claude-opus-4-6"]
+            "pro": ["librosa", "essentia", GEMINI_PRO_MODEL, "gpt-4o-audio", "claude-opus-4-6"],
+            "fidelity": ["clap-htsat", "clap-tagger-mtt50", "m2d-vit", "librosa", "essentia", GEMINI_FLASH_MODEL, "gemini-embedding-2", "claude-sonnet-4-6"],
         },
         "active_analyses": MAX_CONCURRENT - analysis_semaphore._value,
         "max_concurrent": MAX_CONCURRENT
     }
-
 
 # ────────────────────────────────────────
 # MODE A: Original — Prompt + Audio → Full evaluation
@@ -1083,6 +1131,13 @@ async def analyze_audio_only(
                 flash_report = {"error": str(e)}
                 flash_report_str = json.dumps(flash_report)
 
+            # Engine 4: CLAP music tagger (MTT zero-shot — replaces PANNs)
+            loop = asyncio.get_event_loop()
+            try:
+                clap_tagger_result = await loop.run_in_executor(None, score_clap_music_tagger, audio_bytes, "")
+            except Exception as e:
+                clap_tagger_result = {"engine": "clap_tagger", "error": str(e)}
+
             # Reverse prompt prediction
             try:
                 predicted = await run_reverse_prompt(librosa_result, essentia_result, flash_report_str)
@@ -1101,6 +1156,7 @@ async def analyze_audio_only(
                     "librosa": librosa_result,
                     "essentia": essentia_result,
                     "gemini_flash": flash_report,
+                    "clap_tagger": clap_tagger_result,
                     "predicted": predicted
                 }),
                 "analysis_mode": "audio_only",
@@ -1115,6 +1171,7 @@ async def analyze_audio_only(
                 "librosa": librosa_result,
                 "essentia": essentia_result,
                 "gemini_flash": flash_report,
+                "clap_tagger": clap_tagger_result,
                 "predicted_prompt": predicted,
                 "quality_score": quality_score,
                 "reeval_recommended": reeval_recommended,
@@ -1126,100 +1183,167 @@ async def analyze_audio_only(
         raise HTTPException(503, "Server busy. Please try again in a moment.")
 
 
-
-# ════════════════════════════════════════
-# ════════════════════════════════════════
-# MODE C: FIDELITY COMPARISON (Lightweight)
-# Compares two existing analyses by ID — no audio processing
-# ════════════════════════════════════════
-
-@app.post("/compare")
-async def compare_analyses(
-    original_id: int = Form(...),
-    reproduction_id: int = Form(...),
-    label: str = Form("")
+# ────────────────────────────────────────
+# MODE C: FIDELITY CHECK — Prompt↔Audio Multi-Engine Comparison
+# CLAP + PANNs + librosa + Essentia + Gemini Embedding 2
+# ────────────────────────────────────────
+@app.post("/fidelity")
+async def fidelity_check(
+    file: UploadFile = File(...),
+    prompt: str = Form(...),
+    ip: str = Form("unknown")
 ):
     """
-    Compare two existing audio analyses by their IDs.
-    No audio processing — just fetches both from Supabase and computes fidelity.
-    
-    Workflow:
-    1. POST /analyze-audio with original audio -> get original_id
-    2. Generate reproduction in Suno using predicted_prompt
-    3. POST /analyze-audio with Suno output -> get reproduction_id
-    4. POST /compare with both IDs -> get fidelity score
+    Comprehensive fidelity check: How well does the generated audio match the original prompt?
+    Uses 6 engines: CLAP (text↔audio), PANNs (audio tagging), librosa, Essentia,
+    Gemini Flash (subjective), Gemini Embedding 2 (text similarity).
+    Returns multi-dimensional fidelity scores + composite score.
     """
+    if not file.content_type or "audio" not in file.content_type:
+        raise HTTPException(400, "File must be an audio file (mp3, wav, etc.)")
+
+    audio_bytes = await file.read()
+    if len(audio_bytes) > 25 * 1024 * 1024:
+        raise HTTPException(400, "File too large. Maximum 25MB.")
+
     try:
-        # Fetch both analyses from Supabase
-        original_rec = await fetch_from_supabase(original_id)
-        if not original_rec:
-            raise HTTPException(404, f"Original analysis {original_id} not found")
-        
-        reproduction_rec = await fetch_from_supabase(reproduction_id)
-        if not reproduction_rec:
-            raise HTTPException(404, f"Reproduction analysis {reproduction_id} not found")
-        
-        # Parse stored analysis data
-        orig_raw = json.loads(original_rec.get("gemini_report", "{}"))
-        repr_raw = json.loads(reproduction_rec.get("gemini_report", "{}"))
-        
-        original_data = {
-            "librosa": orig_raw.get("librosa", {}),
-            "essentia": orig_raw.get("essentia", {}),
-            "gemini_flash": orig_raw.get("gemini_flash", {}),
-            "predicted_prompt": orig_raw.get("predicted", {})
-        }
-        reproduction_data = {
-            "librosa": repr_raw.get("librosa", {}),
-            "essentia": repr_raw.get("essentia", {}),
-            "gemini_flash": repr_raw.get("gemini_flash", {}),
-        }
-        
-        # Compute fidelity score
-        fidelity = compute_fidelity_score(original_data, reproduction_data)
-        
-        # Save comparison to Supabase
-        compare_result = {
-            "ip": "",
-            "original_prompt": original_data.get("predicted_prompt", {}).get("predicted_prompt", label),
-            "gemini_report": json.dumps({
-                "comparison_type": "fidelity",
-                "original_id": original_id,
-                "reproduction_id": reproduction_id,
-                "fidelity": fidelity
-            }),
-            "analysis_mode": "fidelity_compare",
-            "prompt_type": "comparison",
-            "overall_score": fidelity["fidelity_score"],
-        }
-        saved = await save_to_supabase(compare_result)
-        sid = saved[0].get("id") if saved and isinstance(saved, list) else None
-        
-        og = original_data.get("gemini_flash", {})
-        rg = reproduction_data.get("gemini_flash", {})
-        return {
-            "mode": "fidelity_compare",
-            "fidelity": fidelity,
-            "original_summary": {
-                "bpm": original_data["librosa"].get("bpm"),
-                "key": original_data.get("essentia", {}).get("key", original_data["librosa"].get("key")),
-                "genre": og.get("genre") if isinstance(og, dict) else None,
-            },
-            "reproduction_summary": {
-                "bpm": reproduction_data["librosa"].get("bpm"),
-                "key": reproduction_data.get("essentia", {}).get("key", reproduction_data["librosa"].get("key")),
-                "genre": rg.get("genre") if isinstance(rg, dict) else None,
-            },
-            "predicted_prompt_used": original_data.get("predicted_prompt", {}).get("predicted_prompt", ""),
-            "comparison_id": sid,
-            "label": label
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Compare failed: {str(e)}")
+        async with analysis_semaphore:
+            loop = asyncio.get_event_loop()
+
+            # ── Parallel engine execution ──
+            # CPU-bound engines in thread pool
+            librosa_future = loop.run_in_executor(None, analyze_with_librosa, audio_bytes)
+            essentia_future = loop.run_in_executor(None, analyze_with_essentia, audio_bytes)
+            clap_future = loop.run_in_executor(None, get_clap_alignment, audio_bytes, prompt)
+            clap_tagger_future = loop.run_in_executor(None, score_clap_music_tagger, audio_bytes, prompt)
+            m2d_future = loop.run_in_executor(None, extract_m2d_embedding, audio_bytes)
+
+            # Wait for all CPU engines
+            librosa_result = await librosa_future
+            essentia_result = await essentia_future
+            clap_result = await clap_future
+            clap_tagger_result = await clap_tagger_future
+            m2d_result = await m2d_future
+
+            # Async engine: Gemini Flash (needs audio bytes)
+            try:
+                flash_raw = await run_gemini_flash(audio_bytes, file.content_type or "audio/mpeg")
+                flash_str = extract_json(flash_raw)
+                flash_report = json.loads(flash_str) if flash_str.startswith("{") else {"raw": flash_str}
+            except Exception as e:
+                flash_report = {"error": str(e)}
+                flash_str = json.dumps(flash_report)
+
+            # Reverse prompt prediction
+            try:
+                predicted = await run_reverse_prompt(librosa_result, essentia_result, flash_str)
+            except Exception as e:
+                predicted = {"predicted_prompt": "", "confidence": 0, "error": str(e)}
+
+            # Gemini Embedding 2: prompt text vs predicted prompt text
+            predicted_prompt_text = predicted.get("predicted_prompt", "")
+            prompt_embed = _get_embedding_v2(prompt)
+            predicted_embed = _get_embedding_v2(predicted_prompt_text)
+            text_sim = _embedding_cosine_sim(prompt_embed, predicted_embed)
+
+            # ── Fidelity Dimension Scores (all 0-10 scale) ──
+            dimensions = {}
+
+            # 1. CLAP alignment (direct text↔audio)
+            clap_score = clap_result.get("alignment_score_10")
+            if clap_score is not None:
+                dimensions["clap_alignment"] = clap_score
+
+            # 2. BPM fidelity
+            bpm_target = _extract_bpm_from_prompt(prompt)
+            bpm_detected = librosa_result.get("bpm", 0)
+            if bpm_target:
+                dimensions["bpm_fidelity"] = _calc_bpm_fidelity(bpm_target, bpm_detected)
+
+            # 3. Key fidelity
+            key_target = _extract_key_from_prompt(prompt)
+            key_detected = librosa_result.get("key_full", "")
+            if key_target:
+                dimensions["key_fidelity"] = _calc_key_fidelity(key_target, key_detected)
+
+            # 4. Text embedding similarity (prompt vs reverse-predicted prompt)
+            if text_sim > 0:
+                normalized_text = max(0.0, min(1.0, (text_sim - 0.5) / 0.35)) * 10
+                dimensions["text_similarity"] = round(normalized_text, 1)
+
+            # 5. Gemini Flash tag match (genre/mood/instrument keywords vs prompt)
+            tag_score = score_gemini_tag_match(prompt, flash_report)
+            if tag_score > 0:
+                dimensions["gemini_tag_match"] = tag_score
+
+            # 6. CLAP music tagger (MTT vocabulary zero-shot — MusiCNN equivalent)
+            clap_tagger_score = clap_tagger_result.get("tag_match_score")
+            if clap_tagger_score is not None and not clap_tagger_result.get("error"):
+                dimensions["clap_tagger_match"] = clap_tagger_score
+
+            # ── Composite Fidelity Score (weighted) ──
+            weights = {
+                "clap_alignment": 3.0,      # Most important: direct text↔audio
+                "bpm_fidelity": 1.5,
+                "key_fidelity": 2.0,
+                "text_similarity": 2.0,
+                "gemini_tag_match": 1.5,    # Gemini Flash semantic tags vs prompt
+                "clap_tagger_match": 1.0,   # CLAP MTT zero-shot tags vs prompt (MusiCNN equiv)
+            }
+            if dimensions:
+                total_w = sum(weights.get(k, 1.0) for k in dimensions)
+                composite = sum(dimensions[k] * weights.get(k, 1.0) for k in dimensions) / total_w
+            else:
+                composite = 0.0
+
+            # ── Save to Supabase ──
+            db_result = {
+                "ip": ip,
+                "original_prompt": prompt,
+                "gemini_report": json.dumps({
+                    "librosa": librosa_result,
+                    "essentia": essentia_result,
+                    "clap": clap_result,
+                    "clap_tagger": clap_tagger_result,
+                    "m2d": {"embedding_dim": m2d_result.get("embedding_dim"), "error": m2d_result.get("error")},
+                    "m2d_embedding": m2d_result.get("embedding"),  # stored for /compare
+                    "gemini_flash": flash_report,
+                    "predicted": predicted,
+                    "text_embedding_similarity": round(text_sim, 4),
+                    "fidelity_dimensions": dimensions,
+                }),
+                "analysis_mode": "fidelity_check",
+                "prompt_type": "style",
+                "overall_score": round(composite, 1),
+            }
+            saved = await save_to_supabase(db_result)
+            saved_id = saved[0].get("id") if saved and isinstance(saved, list) else None
+
+            return {
+                "mode": "fidelity_check",
+                "composite_fidelity": round(composite, 1),
+                "dimensions": dimensions,
+                "clap": clap_result,
+                "m2d": {"embedding_dim": m2d_result.get("embedding_dim"), "error": m2d_result.get("error")},
+                "librosa": librosa_result,
+                "essentia": essentia_result,
+                "gemini_flash": flash_report,
+                "predicted_prompt": predicted,
+                "text_embedding_similarity": round(text_sim, 4),
+                "prompt_analysis": {
+                    "bpm_requested": bpm_target,
+                    "key_requested": key_target,
+                    "bpm_detected": bpm_detected,
+                    "key_detected": key_detected,
+                },
+                "analysis_id": saved_id,
+            }
+
+    except asyncio.TimeoutError:
+        raise HTTPException(503, "Server busy. Please try again in a moment.")
 
 
+# ────────────────────────────────────────
 # ADMIN: Re-evaluation of Mode B results
 # (Pro tier — Gemini Pro + Claude Opus, internal use only)
 # ────────────────────────────────────────
