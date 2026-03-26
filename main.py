@@ -744,7 +744,7 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
         dims["key"] = 0.0
     
     # 3. Spectral fidelity — compare centroid, bandwidth, rolloff
-    spectral_feats = ["spectral_centroid_mean", "spectral_bandwidth_mean", "spectral_rolloff_mean"]
+    spectral_feats = ["spectral_centroid_hz", "spectral_bandwidth_hz", "spectral_rolloff_hz"]
     spec_sims = []
     for feat in spectral_feats:
         v_o = orig_lib.get(feat, 0) or 0
