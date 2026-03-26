@@ -916,57 +916,6 @@ async def update_supabase(analysis_id: int, updates: dict):
 # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
 # ENDPOINTS
 # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-@app.get("/test-embed")
-async def test_embed():
-    """Debug endpoint: test if Gemini embedding works."""
-    text_a = "progressive house, electronic dance, synth-pop"
-    text_b = "nu-disco, indie dance, electronic pop"
-    raw_error = None
-    raw_type = None
-    raw_keys = None
-    try:
-        raw = genai.embed_content(model="models/embedding-001", content=text_a)
-        raw_type = str(type(raw).__name__)
-        if hasattr(raw, "keys"):
-            raw_keys = list(raw.keys())
-        elif hasattr(raw, "__dict__"):
-            raw_keys = list(vars(raw).keys())[:5]
-    except Exception as e:
-        raw_error = f"{type(e).__name__}: {e}"
-    # Also test httpx REST directly to expose error
-    httpx_error = None
-    try:
-        import httpx as _httpx
-        _url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
-        _payload = {"model": "models/gemini-embedding-001", "content": {"parts": [{"text": text_a}]}}
-        with _httpx.Client(timeout=10) as _client:
-            _resp = _client.post(_url, json=_payload, params={"key": GEMINI_KEY})
-            httpx_status = _resp.status_code
-            httpx_body = _resp.text[:300]
-    except Exception as _e:
-        httpx_error = f"{type(_e).__name__}: {_e}"
-        httpx_status = None
-        httpx_body = None
-    emb_a = _get_embedding(text_a)
-    emb_b = _get_embedding(text_b)
-    if emb_a and emb_b:
-        sim = _cosine_similarity(emb_a, emb_b)
-        norm = max(0.0, min(1.0, (sim - 0.5) / 0.4))
-        return {"status": "ok", "dim": len(emb_a), "cosine": round(sim, 4), "normalized": round(norm, 4)}
-    else:
-        return {
-            "status": "fail",
-            "error": "empty embeddings",
-            "a_len": len(emb_a),
-            "b_len": len(emb_b),
-            "sdk_raw_error": raw_error,
-            "httpx_status": httpx_status,
-            "httpx_body": httpx_body,
-            "httpx_error": httpx_error,
-            "gemini_key_set": bool(GEMINI_KEY)
-        }
-
-
 @app.get("/health")
 async def health():
     return {
