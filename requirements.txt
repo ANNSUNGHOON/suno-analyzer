@@ -13,5 +13,4 @@ python-multipart==0.0.12
 torch==2.5.1+cpu
 torchaudio==2.5.1+cpu
 laion-clap>=1.1.6
-musicnn
 transformers>=4.40.0
