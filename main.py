@@ -651,6 +651,50 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
 # Original audio analysis vs Suno reproduction analysis
 # ════════════════════════════════════════
 
+
+# --- Embedding-based text similarity (Gemini Embedding API) ---
+
+def _get_embedding(text: str) -> list:
+    """Get embedding vector from Gemini Embedding API."""
+    if not text or not text.strip():
+        return []
+    try:
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text.strip()
+        )
+        return result["embedding"]
+    except Exception as e:
+        print(f"[WARN] Embedding failed: {e}")
+        return []
+
+
+def _cosine_similarity(a: list, b: list) -> float:
+    """Cosine similarity between two vectors."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    a_arr = np.array(a, dtype=float)
+    b_arr = np.array(b, dtype=float)
+    dot = np.dot(a_arr, b_arr)
+    norm = np.linalg.norm(a_arr) * np.linalg.norm(b_arr)
+    if norm == 0:
+        return 0.0
+    return float(dot / norm)
+
+
+def _embedding_similarity(text_a: str, text_b: str) -> float:
+    """Semantic similarity using Gemini embeddings. Falls back to Jaccard on failure."""
+    emb_a = _get_embedding(text_a)
+    emb_b = _get_embedding(text_b)
+    if emb_a and emb_b:
+        sim = _cosine_similarity(emb_a, emb_b)
+        # Cosine sim range for text embeddings is typically 0.3~1.0
+        # Normalize to 0~1: anything below 0.5 = 0, above 0.9 = 1
+        normalized = max(0.0, min(1.0, (sim - 0.5) / 0.4))
+        return normalized
+    # Fallback to Jaccard if embedding fails
+    return _text_overlap(text_a, text_b)
+
 def _text_overlap(a: str, b: str) -> float:
     """Jaccard similarity of comma-separated keyword sets."""
     if not a or not b:
@@ -766,23 +810,29 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
     # 6. Genre fidelity — Gemini genre text overlap
     genre_o = orig_gem.get("genre", "") if isinstance(orig_gem, dict) else ""
     genre_r = repr_gem.get("genre", "") if isinstance(repr_gem, dict) else ""
-    dims["genre"] = _text_overlap(genre_o, genre_r)
+    dims["genre"] = _embedding_similarity(genre_o, genre_r)
     
     # 7. Mood fidelity — Gemini mood text overlap
     mood_o = orig_gem.get("mood", "") if isinstance(orig_gem, dict) else ""
     mood_r = repr_gem.get("mood", "") if isinstance(repr_gem, dict) else ""
-    dims["mood"] = _text_overlap(mood_o, mood_r)
+    dims["mood"] = _embedding_similarity(mood_o, mood_r)
     
     # 8. Instrument fidelity — list overlap
     inst_o = orig_gem.get("instruments", []) if isinstance(orig_gem, dict) else []
     inst_r = repr_gem.get("instruments", []) if isinstance(repr_gem, dict) else []
-    dims["instruments"] = _list_overlap(inst_o, inst_r)
+    # Convert lists to comma-joined text for embedding comparison
+    inst_text_o = ", ".join(inst_o) if isinstance(inst_o, list) else str(inst_o)
+    inst_text_r = ", ".join(inst_r) if isinstance(inst_r, list) else str(inst_r)
+    dims["instruments"] = _embedding_similarity(inst_text_o, inst_text_r)
     
     # 9. Vocal type fidelity
     vocal_o = (orig_gem.get("vocal_type", "") or "").lower() if isinstance(orig_gem, dict) else ""
     vocal_r = (repr_gem.get("vocal_type", "") or "").lower() if isinstance(repr_gem, dict) else ""
     if vocal_o and vocal_r:
-        dims["vocal"] = 1.0 if vocal_o == vocal_r else 0.3
+        if vocal_o == vocal_r:
+            dims["vocal"] = 1.0
+        else:
+            dims["vocal"] = _embedding_similarity(vocal_o, vocal_r)
     else:
         dims["vocal"] = 0.5  # both instrumental = neutral
     
