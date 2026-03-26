@@ -647,6 +647,174 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
 
 
 # ════════════════════════════════════════
+# FIDELITY COMPARE ENGINE
+# Original audio analysis vs Suno reproduction analysis
+# ════════════════════════════════════════
+
+def _text_overlap(a: str, b: str) -> float:
+    """Jaccard similarity of comma-separated keyword sets."""
+    if not a or not b:
+        return 0.0
+    set_a = {t.strip().lower() for t in a.replace("/", ",").split(",") if t.strip()}
+    set_b = {t.strip().lower() for t in b.replace("/", ",").split(",") if t.strip()}
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
+def _list_overlap(a: list, b: list) -> float:
+    """Jaccard similarity of two string lists."""
+    if not a or not b:
+        return 0.0
+    set_a = {x.strip().lower() for x in a if isinstance(x, str)}
+    set_b = {x.strip().lower() for x in b if isinstance(x, str)}
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
+def _ratio_similarity(v1: float, v2: float) -> float:
+    """0-1 similarity based on ratio of two positive values."""
+    if v1 <= 0 or v2 <= 0:
+        return 0.0
+    return min(v1, v2) / max(v1, v2)
+
+
+def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
+    """
+    Compare original audio analysis vs Suno reproduction analysis.
+    Returns per-dimension fidelity (0-1) and weighted overall score (0-10).
+    
+    Both inputs should have: librosa, essentia, gemini_flash dicts.
+    """
+    orig_lib = original.get("librosa", {})
+    orig_ess = original.get("essentia", {})
+    orig_gem = original.get("gemini_flash", {})
+    
+    repr_lib = reproduction.get("librosa", {})
+    repr_ess = reproduction.get("essentia", {})
+    repr_gem = reproduction.get("gemini_flash", {})
+    
+    dims = {}
+    
+    # 1. BPM fidelity — use best match (direct or half/double time)
+    bpm_o = orig_lib.get("bpm", 0) or 0
+    bpm_r = repr_lib.get("bpm", 0) or 0
+    if bpm_o > 0 and bpm_r > 0:
+        ratios = [
+            _ratio_similarity(bpm_o, bpm_r),
+            _ratio_similarity(bpm_o, bpm_r * 2),
+            _ratio_similarity(bpm_o * 2, bpm_r),
+        ]
+        dims["bpm"] = max(ratios)
+    else:
+        dims["bpm"] = 0.0
+    
+    # 2. Key fidelity
+    key_o = orig_ess.get("key", "") or orig_lib.get("key", "")
+    key_r = repr_ess.get("key", "") or repr_lib.get("key", "")
+    scale_o = orig_ess.get("scale", "") or orig_lib.get("scale", "")
+    scale_r = repr_ess.get("scale", "") or repr_lib.get("scale", "")
+    relative_pairs = {
+        "C": "A", "G": "E", "D": "B", "A": "F#", "E": "C#", "B": "G#",
+        "F": "D", "Bb": "G", "Eb": "C", "Ab": "F", "Db": "Bb", "Gb": "Eb",
+        "F#": "D#", "C#": "A#"
+    }
+    if key_o and key_r:
+        if key_o == key_r and scale_o == scale_r:
+            dims["key"] = 1.0
+        elif key_o == key_r:
+            dims["key"] = 0.7
+        elif (scale_o == "major" and relative_pairs.get(key_o) == key_r) or \
+             (scale_r == "major" and relative_pairs.get(key_r) == key_o):
+            dims["key"] = 0.5
+        else:
+            # Check semitone distance (within ±1 semitone = partial match)
+            notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+            alt = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
+            ko = alt.get(key_o, key_o)
+            kr = alt.get(key_r, key_r)
+            if ko in notes and kr in notes:
+                dist = abs(notes.index(ko) - notes.index(kr))
+                dist = min(dist, 12 - dist)
+                dims["key"] = max(0.0, 1.0 - dist * 0.15)
+            else:
+                dims["key"] = 0.0
+    else:
+        dims["key"] = 0.0
+    
+    # 3. Spectral fidelity — compare centroid, bandwidth, rolloff
+    spectral_feats = ["spectral_centroid_mean", "spectral_bandwidth_mean", "spectral_rolloff_mean"]
+    spec_sims = []
+    for feat in spectral_feats:
+        v_o = orig_lib.get(feat, 0) or 0
+        v_r = repr_lib.get(feat, 0) or 0
+        if v_o > 0 and v_r > 0:
+            spec_sims.append(_ratio_similarity(v_o, v_r))
+    dims["spectral"] = sum(spec_sims) / len(spec_sims) if spec_sims else 0.0
+    
+    # 4. Dynamic range fidelity
+    dr_o = orig_lib.get("dynamic_range_db", 0) or 0
+    dr_r = repr_lib.get("dynamic_range_db", 0) or 0
+    dims["dynamics"] = _ratio_similarity(dr_o, dr_r) if dr_o > 0 and dr_r > 0 else 0.0
+    
+    # 5. Energy fidelity — danceability, energy from essentia
+    dance_o = orig_ess.get("danceability", 0) or 0
+    dance_r = repr_ess.get("danceability", 0) or 0
+    dims["energy"] = _ratio_similarity(dance_o, dance_r) if dance_o > 0 and dance_r > 0 else 0.0
+    
+    # 6. Genre fidelity — Gemini genre text overlap
+    genre_o = orig_gem.get("genre", "") if isinstance(orig_gem, dict) else ""
+    genre_r = repr_gem.get("genre", "") if isinstance(repr_gem, dict) else ""
+    dims["genre"] = _text_overlap(genre_o, genre_r)
+    
+    # 7. Mood fidelity — Gemini mood text overlap
+    mood_o = orig_gem.get("mood", "") if isinstance(orig_gem, dict) else ""
+    mood_r = repr_gem.get("mood", "") if isinstance(repr_gem, dict) else ""
+    dims["mood"] = _text_overlap(mood_o, mood_r)
+    
+    # 8. Instrument fidelity — list overlap
+    inst_o = orig_gem.get("instruments", []) if isinstance(orig_gem, dict) else []
+    inst_r = repr_gem.get("instruments", []) if isinstance(repr_gem, dict) else []
+    dims["instruments"] = _list_overlap(inst_o, inst_r)
+    
+    # 9. Vocal type fidelity
+    vocal_o = (orig_gem.get("vocal_type", "") or "").lower() if isinstance(orig_gem, dict) else ""
+    vocal_r = (repr_gem.get("vocal_type", "") or "").lower() if isinstance(repr_gem, dict) else ""
+    if vocal_o and vocal_r:
+        dims["vocal"] = 1.0 if vocal_o == vocal_r else 0.3
+    else:
+        dims["vocal"] = 0.5  # both instrumental = neutral
+    
+    # Weighted overall fidelity (0-10)
+    weights = {
+        "bpm": 1.5, "key": 2.0, "spectral": 1.5, "dynamics": 0.5,
+        "energy": 0.5, "genre": 2.0, "mood": 1.0, "instruments": 1.0, "vocal": 0.5
+    }
+    total_w = sum(weights.values())  # 10.5
+    weighted_sum = sum(dims.get(k, 0) * w for k, w in weights.items())
+    overall = (weighted_sum / total_w) * 10.0
+    
+    # Per-dimension breakdown with letter grades
+    def grade(v):
+        if v >= 0.9: return "A"
+        if v >= 0.7: return "B"
+        if v >= 0.5: return "C"
+        if v >= 0.3: return "D"
+        return "F"
+    
+    breakdown = {k: {"score": round(v, 3), "grade": grade(v)} for k, v in dims.items()}
+    
+    return {
+        "fidelity_score": round(overall, 1),
+        "breakdown": breakdown,
+        "verdict": "high_fidelity" if overall >= 7.0 else "medium_fidelity" if overall >= 4.5 else "low_fidelity",
+        "weakest": min(dims, key=dims.get) if dims else None,
+        "strongest": max(dims, key=dims.get) if dims else None,
+    }
+
+
+# ════════════════════════════════════════
 # SUPABASE HELPERS
 # ════════════════════════════════════════
 async def save_to_supabase(data: dict):
@@ -699,7 +867,7 @@ async def health():
     return {
         "status": "ok",
         "service": "suno-audio-analyzer",
-        "version": "5.0-mode-b",
+        "version": "5.1-mode-bc",
         "modes": {
             "mode_a": "Prompt + Audio → Quad Engine → Claude Opus evaluation",
             "mode_b": "Audio only → librosa + Essentia + Gemini Flash → Reverse prompt prediction"
@@ -888,6 +1056,102 @@ async def analyze_audio_only(
 
     except asyncio.TimeoutError:
         raise HTTPException(503, "Server busy. Please try again in a moment.")
+
+
+
+# ════════════════════════════════════════
+# MODE C: FIDELITY COMPARISON
+# Compare original audio vs Suno reproduction
+# ════════════════════════════════════════
+
+@app.post("/compare")
+async def compare_audio(
+    original_file: UploadFile = File(None),
+    reproduction_file: UploadFile = File(...),
+    original_analysis_id: int = Form(None),
+    label: str = Form("")
+):
+    """
+    Compare original audio analysis vs Suno reproduction.
+    Two modes:
+    1. original_analysis_id -> fetch from Supabase, analyze only reproduction
+    2. original_file -> analyze both from scratch
+    Returns fidelity score (0-10) with per-dimension breakdown.
+    """
+    async with analysis_semaphore:
+        try:
+            if original_analysis_id:
+                record = await fetch_from_supabase(original_analysis_id)
+                if not record:
+                    raise HTTPException(404, f"Analysis {original_analysis_id} not found")
+                raw = json.loads(record.get("gemini_report", "{}"))
+                original_data = {
+                    "librosa": raw.get("librosa", {}),
+                    "essentia": raw.get("essentia", {}),
+                    "gemini_flash": raw.get("gemini_flash", {}),
+                    "predicted_prompt": raw.get("predicted", {})
+                }
+            elif original_file:
+                ob = await original_file.read()
+                original_data = {
+                    "librosa": analyze_with_librosa(ob),
+                    "essentia": analyze_with_essentia(ob),
+                    "gemini_flash": await analyze_with_gemini_flash(ob)
+                }
+            else:
+                raise HTTPException(400, "Provide original_file or original_analysis_id")
+
+            rb = await reproduction_file.read()
+            reproduction_data = {
+                "librosa": analyze_with_librosa(rb),
+                "essentia": analyze_with_essentia(rb),
+                "gemini_flash": await analyze_with_gemini_flash(rb)
+            }
+
+            fidelity = compute_fidelity_score(original_data, reproduction_data)
+
+            compare_result = {
+                "ip": "",
+                "original_prompt": original_data.get("predicted_prompt", {}).get("predicted_prompt", label),
+                "gemini_report": json.dumps({
+                    "comparison_type": "fidelity",
+                    "original": original_data,
+                    "reproduction": reproduction_data,
+                    "fidelity": fidelity
+                }),
+                "analysis_mode": "fidelity_compare",
+                "prompt_type": "comparison",
+                "overall_score": fidelity["fidelity_score"],
+            }
+            saved = await save_to_supabase(compare_result)
+            sid = saved[0].get("id") if saved and isinstance(saved, list) else None
+
+            og = original_data.get("gemini_flash", {})
+            rg = reproduction_data.get("gemini_flash", {})
+            return {
+                "mode": "fidelity_compare",
+                "fidelity": fidelity,
+                "original_summary": {
+                    "bpm": original_data.get("librosa", {}).get("bpm"),
+                    "key": original_data.get("essentia", {}).get("key", original_data.get("librosa", {}).get("key")),
+                    "genre": og.get("genre") if isinstance(og, dict) else None,
+                },
+                "reproduction_summary": {
+                    "bpm": reproduction_data["librosa"].get("bpm"),
+                    "key": reproduction_data["essentia"].get("key", reproduction_data["librosa"].get("key")),
+                    "genre": rg.get("genre") if isinstance(rg, dict) else None,
+                },
+                "predicted_prompt_used": original_data.get("predicted_prompt", {}).get("predicted_prompt", ""),
+                "comparison_id": sid,
+                "label": label
+            }
+        except asyncio.TimeoutError:
+            raise HTTPException(503, "Server busy.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Compare failed: {str(e)}")
+
 
 
 # ────────────────────────────────────────
