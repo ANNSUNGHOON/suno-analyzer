@@ -655,27 +655,21 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
 # --- Embedding-based text similarity (Gemini Embedding API) ---
 
 def _get_embedding(text: str) -> list:
-    """Get embedding vector from Gemini Embedding API."""
+    """Get embedding vector via Gemini REST API (bypasses SDK versioning issues)."""
     if not text or not text.strip():
         return []
     try:
-        result = genai.embed_content(
-            model="models/embedding-001",
-            content=text.strip()
-        )
-        raw_emb = None
-        if hasattr(result, "get"):
-            raw_emb = result.get("embedding")
-        if raw_emb is None:
-            raw_emb = getattr(result, "embedding", None)
-        if raw_emb is None:
-            print("[WARN] Embedding: no embedding field in result")
-            return []
-        if hasattr(raw_emb, "values"):
-            return list(raw_emb.values)
-        return list(raw_emb)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+        payload = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": text.strip()}]}
+        }
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(url, json=payload, params={"key": GEMINI_KEY})
+            resp.raise_for_status()
+            return resp.json()["embedding"]["values"]
     except Exception as e:
-        print(f"[WARN] Embedding failed: {type(e).__name__}: {e}")
+        print(f"[WARN] Embedding REST failed: {type(e).__name__}: {e}")
         return []
 
 
