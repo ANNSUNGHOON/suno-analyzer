@@ -659,7 +659,7 @@ def _get_embedding(text: str) -> list:
     if not text or not text.strip():
         return []
     try:
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-001:embedContent"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
         payload = {
             "model": "models/gemini-embedding-001",
             "content": {"parts": [{"text": text.strip()}]}
@@ -937,7 +937,7 @@ async def test_embed():
     httpx_error = None
     try:
         import httpx as _httpx
-        _url = "https://generativelanguage.googleapis.com/v1/models/gemini-embedding-001:embedContent"
+        _url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
         _payload = {"model": "models/gemini-embedding-001", "content": {"parts": [{"text": text_a}]}}
         with _httpx.Client(timeout=10) as _client:
             _resp = _client.post(_url, json=_payload, params={"key": GEMINI_KEY})
