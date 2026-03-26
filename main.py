@@ -33,7 +33,7 @@ ADMIN_KEY = os.getenv("ADMIN_KEY", "")  # Set this in Railway env vars
 
 # Model config — easy to swap
 GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
-GEMINI_FLASH_MODEL = "gemini-2.5-flash-preview-04-17"  # Lite tier
+GEMINI_FLASH_MODEL = "gemini-2.5-flash"  # Stable
 
 # Quality threshold for re-eval recommendation
 REEVAL_SCORE_THRESHOLD = 6.0
