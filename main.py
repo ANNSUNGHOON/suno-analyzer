@@ -933,6 +933,20 @@ async def test_embed():
             raw_keys = list(vars(raw).keys())[:5]
     except Exception as e:
         raw_error = f"{type(e).__name__}: {e}"
+    # Also test httpx REST directly to expose error
+    httpx_error = None
+    try:
+        import httpx as _httpx
+        _url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+        _payload = {"model": "models/text-embedding-004", "content": {"parts": [{"text": text_a}]}}
+        with _httpx.Client(timeout=10) as _client:
+            _resp = _client.post(_url, json=_payload, params={"key": GEMINI_KEY})
+            httpx_status = _resp.status_code
+            httpx_body = _resp.text[:300]
+    except Exception as _e:
+        httpx_error = f"{type(_e).__name__}: {_e}"
+        httpx_status = None
+        httpx_body = None
     emb_a = _get_embedding(text_a)
     emb_b = _get_embedding(text_b)
     if emb_a and emb_b:
@@ -945,9 +959,11 @@ async def test_embed():
             "error": "empty embeddings",
             "a_len": len(emb_a),
             "b_len": len(emb_b),
-            "raw_error": raw_error,
-            "raw_type": raw_type,
-            "raw_keys": raw_keys
+            "sdk_raw_error": raw_error,
+            "httpx_status": httpx_status,
+            "httpx_body": httpx_body,
+            "httpx_error": httpx_error,
+            "gemini_key_set": bool(GEMINI_KEY)
         }
 
 
