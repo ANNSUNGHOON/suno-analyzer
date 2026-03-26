@@ -660,7 +660,7 @@ def _get_embedding(text: str) -> list:
         return []
     try:
         result = genai.embed_content(
-            model="models/text-embedding-004",
+            model="models/embedding-001",
             content=text.strip()
         )
         raw_emb = None
@@ -931,7 +931,7 @@ async def test_embed():
     raw_type = None
     raw_keys = None
     try:
-        raw = genai.embed_content(model="models/text-embedding-004", content=text_a)
+        raw = genai.embed_content(model="models/embedding-001", content=text_a)
         raw_type = str(type(raw).__name__)
         if hasattr(raw, "keys"):
             raw_keys = list(raw.keys())
