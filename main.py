@@ -956,7 +956,7 @@ async def health():
     return {
         "status": "ok",
         "service": "suno-audio-analyzer",
-        "version": "5.2-embedding",
+        "version": "5.3-httpx-embed",
         "modes": {
             "mode_a": "Prompt + Audio ??Quad Engine ??Claude Opus evaluation",
             "mode_b": "Audio only ??librosa + Essentia + Gemini Flash ??Reverse prompt prediction"
