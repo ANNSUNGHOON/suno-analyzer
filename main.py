@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import anthropic
@@ -12,7 +12,7 @@ import numpy as np
 import asyncio
 import base64
 
-app = FastAPI(title="Suno Audio Analyzer v5 ??Quad Engine + Mode B")
+app = FastAPI(title="Suno Audio Analyzer v5 — Quad Engine + Mode B")
 
 MAX_CONCURRENT = 2
 analysis_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
@@ -31,7 +31,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "https://jgfvwfalxnrdujaoqoiq.supabase.
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")  # Set this in Railway env vars
 
-# Model config ??easy to swap
+# Model config — easy to swap
 GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 GEMINI_FLASH_MODEL = "gemini-2.5-flash"  # Stable
 
@@ -41,9 +41,9 @@ REEVAL_SCORE_THRESHOLD = 6.0
 genai.configure(api_key=GEMINI_KEY)
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# ENGINE 1: LIBROSA ??Mathematical Analysis
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# ENGINE 1: LIBROSA — Mathematical Analysis
+# ════════════════════════════════════════
 def analyze_with_librosa(audio_bytes: bytes) -> dict:
     """Mathematically precise: BPM, key, frequency distribution, dynamics."""
     import librosa
@@ -118,9 +118,9 @@ def analyze_with_librosa(audio_bytes: bytes) -> dict:
         os.unlink(tmp_path)
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# ENGINE 2: ESSENTIA ??ML Music Analysis
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# ENGINE 2: ESSENTIA — ML Music Analysis
+# ════════════════════════════════════════
 def analyze_with_essentia(audio_bytes: bytes) -> dict:
     """ML-based: genre, mood, instrument detection, danceability, vocal presence."""
     import essentia.standard as es
@@ -218,12 +218,12 @@ def analyze_with_essentia(audio_bytes: bytes) -> dict:
         os.unlink(tmp_path)
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# ENGINE 3 (Pro): GEMINI PRO ??Full Subjective Analysis
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# ENGINE 3 (Pro): GEMINI PRO — Full Subjective Analysis
+# ════════════════════════════════════════
 GEMINI_ANALYSIS_PROMPT = """You are an expert music production analyst. Analyze this audio file.
 Focus ONLY on qualities that require human-like listening judgment.
-Do NOT estimate BPM, key, or any numerical measurements ??those are handled by separate precision tools.
+Do NOT estimate BPM, key, or any numerical measurements — those are handled by separate precision tools.
 
 Respond ONLY in valid JSON format with NO other text:
 {
@@ -237,9 +237,9 @@ Respond ONLY in valid JSON format with NO other text:
   "dynamics_description": "energy flow, tension/release patterns, build-ups and drops"
 }"""
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# ENGINE 3 (Lite): GEMINI FLASH ??Lightweight Analysis for Mode B
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# ENGINE 3 (Lite): GEMINI FLASH — Lightweight Analysis for Mode B
+# ════════════════════════════════════════
 GEMINI_FLASH_ANALYSIS_PROMPT = """You are an expert music analyst. Analyze this audio and identify its key musical characteristics.
 Be concise but precise. Do NOT estimate BPM or key (handled separately).
 
@@ -255,9 +255,9 @@ Respond ONLY in valid JSON with NO other text:
   "analysis_confidence": 1-10
 }"""
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# REVERSE PROMPT PREDICTOR ??Mode B Core
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# REVERSE PROMPT PREDICTOR — Mode B Core
+# ════════════════════════════════════════
 REVERSE_PROMPT_TEMPLATE = """You are a Suno.ai prompt engineering expert.
 Given the following audio analysis data, predict the most effective Suno prompt that would generate music matching these characteristics.
 
@@ -286,13 +286,13 @@ Respond ONLY in valid JSON with NO other text:
 
 GPT4O_ANALYSIS_PROMPT = """You are an expert music production analyst with deep knowledge of electronic music, hip-hop, jazz, rock, and world music sub-genres.
 Analyze this audio file. Focus ONLY on qualities that require expert human-like listening judgment.
-Do NOT estimate BPM, key, or any numerical measurements ??those are handled by separate precision tools.
+Do NOT estimate BPM, key, or any numerical measurements — those are handled by separate precision tools.
 
 Respond ONLY in valid JSON format with NO other text:
 {
-  "genre": "detected genre(s) and sub-genres ??be as specific as possible (e.g. 'dark electro house' not just 'electronic')",
+  "genre": "detected genre(s) and sub-genres — be as specific as possible (e.g. 'dark electro house' not just 'electronic')",
   "instruments": ["list", "of", "every", "detected", "instrument", "and", "sound_source"],
-  "mood": "overall mood/atmosphere ??use production-specific vocabulary",
+  "mood": "overall mood/atmosphere — use production-specific vocabulary",
   "structure": "song structure with approximate timestamps",
   "production_notes": "mixing quality, distortion level, compression character, reverb type, sound design details",
   "vocal_type": "vocal characteristics if present, or 'instrumental'",
@@ -301,28 +301,28 @@ Respond ONLY in valid JSON format with NO other text:
 }"""
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 # CLAUDE OPUS: Final Evaluation (Mode A)
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 CLAUDE_EVALUATION_PROMPT = """You are evaluating how accurately an AI music generator (Suno) interpreted a style prompt.
 
 ORIGINAL PROMPT given to Suno:
 {prompt}
 
-?먥븧??ANALYSIS DATA FROM 4 INDEPENDENT ENGINES ?먥븧??
-ENGINE 1 ??LIBROSA (mathematically precise measurements):
+═══ ANALYSIS DATA FROM 4 INDEPENDENT ENGINES ═══
+ENGINE 1 — LIBROSA (mathematically precise measurements):
 {librosa_data}
 
-ENGINE 2 ??ESSENTIA (ML-based music classification):
+ENGINE 2 — ESSENTIA (ML-based music classification):
 {essentia_data}
 
-ENGINE 3 ??GEMINI 3.1 PRO (AI subjective listening analysis #1):
+ENGINE 3 — GEMINI 3.1 PRO (AI subjective listening analysis #1):
 {gemini_data}
 
-ENGINE 4 ??GPT-4o AUDIO (AI subjective listening analysis #2):
+ENGINE 4 — GPT-4o AUDIO (AI subjective listening analysis #2):
 {gpt4o_data}
 
-?먥븧??EVALUATION INSTRUCTIONS ?먥븧??
+═══ EVALUATION INSTRUCTIONS ═══
 For BPM accuracy: Use LIBROSA's BPM as primary, cross-check with ESSENTIA's BPM.
 For Key accuracy: Use LIBROSA's key as primary, cross-check with ESSENTIA's key. Note enharmonic equivalents (D#=Eb, etc).
 For Genre accuracy: Cross-reference GEMINI and GPT-4o genre classifications. Where they agree, high confidence. Where they disagree, use ESSENTIA as tiebreaker.
@@ -331,14 +331,14 @@ For Instrument accuracy: Cross-reference GEMINI and GPT-4o instrument lists. Ins
 For Structure accuracy: Cross-reference GEMINI and GPT-4o structure descriptions.
 For Production quality: Cross-reference GEMINI and GPT-4o production notes.
 
-?먥븧??ENGINE RELIABILITY WEIGHTING ?먥븧??
+═══ ENGINE RELIABILITY WEIGHTING ═══
 IMPORTANT: Gemini 3.1 Pro tends to be MORE detailed and MORE accurate at genre/sub-genre classification and mood detection than GPT-4o Audio.
 GPT-4o Audio tends to under-classify genres (e.g. calling "doom metal" just "post-rock") and use milder mood vocabulary.
 When Gemini and GPT-4o disagree on genre or mood:
 - Give Gemini's classification ~70% weight and GPT-4o ~30% weight
 - Do NOT let GPT-4o's weaker genre/mood judgment drag down scores excessively
 
-?먥븧??PROMPT CONFLICT ANALYSIS ?먥븧??
+═══ PROMPT CONFLICT ANALYSIS ═══
 CRITICAL: Before scoring, analyze the original prompt for INTERNAL CONTRADICTIONS between tokens.
 Suno has a priority hierarchy:
 1. Genre archetype energy > explicit BPM (e.g. "trailer music" implies 120+ BPM, overriding "85 BPM")
@@ -358,10 +358,10 @@ Respond ONLY in valid JSON:
   "structure_accuracy": <1-10>,
   "overall_score": <1.0-10.0>,
   "engine_cross_check": {{
-    "bpm_agreement": "librosa X vs essentia Y ??agree/disagree",
-    "key_agreement": "librosa X vs essentia Y ??agree/disagree",
-    "genre_agreement": "gemini 'X' vs gpt4o 'Y' ??agree/disagree",
-    "mood_agreement": "gemini 'X' vs gpt4o 'Y' ??agree/disagree"
+    "bpm_agreement": "librosa X vs essentia Y — agree/disagree",
+    "key_agreement": "librosa X vs essentia Y — agree/disagree",
+    "genre_agreement": "gemini 'X' vs gpt4o 'Y' — agree/disagree",
+    "mood_agreement": "gemini 'X' vs gpt4o 'Y' — agree/disagree"
   }},
   "prompt_conflicts": [
     {{"conflict": "token A vs token B", "winner": "which token Suno prioritized", "reason": "why"}}
@@ -373,25 +373,25 @@ Respond ONLY in valid JSON:
 }}"""
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# CLAUDE OPUS: Re-evaluation (Mode B ??Pro tier)
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# CLAUDE OPUS: Re-evaluation (Mode B → Pro tier)
+# ════════════════════════════════════════
 CLAUDE_REEVAL_PROMPT = """You are evaluating how well a Suno.ai prompt would recreate a reference audio track.
 
 PREDICTED SUNO PROMPT (reverse-engineered from the audio):
 {predicted_prompt}
 
 ORIGINAL AUDIO ANALYSIS:
-ENGINE 1 ??LIBROSA:
+ENGINE 1 — LIBROSA:
 {librosa_data}
 
-ENGINE 2 ??ESSENTIA:
+ENGINE 2 — ESSENTIA:
 {essentia_data}
 
-ENGINE 3 ??GEMINI PRO (full analysis):
+ENGINE 3 — GEMINI PRO (full analysis):
 {gemini_pro_data}
 
-?먥븧??EVALUATION TASK ?먥븧??
+═══ EVALUATION TASK ═══
 Assess whether the predicted prompt accurately captures the musical essence of this audio.
 If Suno were to generate music from this predicted prompt, how faithfully would it reproduce the original?
 
@@ -409,9 +409,9 @@ Respond ONLY in valid JSON:
 }}"""
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 # API CALL HELPERS
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 def extract_json(text: str) -> str:
     text = re.sub(r'```json\s*', '', text)
     text = re.sub(r'```\s*', '', text)
@@ -429,7 +429,7 @@ async def run_gemini(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
 
 
 async def run_gemini_flash(audio_bytes: bytes, mime_type: str = "audio/mpeg") -> str:
-    """Lite analysis with Gemini Flash ??cheaper, faster."""
+    """Lite analysis with Gemini Flash — cheaper, faster."""
     model = genai.GenerativeModel(GEMINI_FLASH_MODEL)
     response = model.generate_content([
         GEMINI_FLASH_ANALYSIS_PROMPT,
@@ -646,30 +646,26 @@ def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_f
     return round(max(0.0, min(score, 10.0)), 1)
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 # FIDELITY COMPARE ENGINE
 # Original audio analysis vs Suno reproduction analysis
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 
 
 # --- Embedding-based text similarity (Gemini Embedding API) ---
 
 def _get_embedding(text: str) -> list:
-    """Get embedding vector via Gemini REST API (bypasses SDK versioning issues)."""
+    """Get embedding vector from Gemini Embedding API."""
     if not text or not text.strip():
         return []
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
-        payload = {
-            "model": "models/gemini-embedding-001",
-            "content": {"parts": [{"text": text.strip()}]}
-        }
-        with httpx.Client(timeout=10) as client:
-            resp = client.post(url, json=payload, params={"key": GEMINI_KEY})
-            resp.raise_for_status()
-            return resp.json()["embedding"]["values"]
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text.strip()
+        )
+        return result["embedding"]
     except Exception as e:
-        print(f"[WARN] Embedding REST failed: {type(e).__name__}: {e}")
+        print(f"[WARN] Embedding failed: {e}")
         return []
 
 
@@ -694,7 +690,7 @@ def _embedding_similarity(text_a: str, text_b: str) -> float:
         sim = _cosine_similarity(emb_a, emb_b)
         # Cosine sim range for text embeddings is typically 0.3~1.0
         # Normalize to 0~1: anything below 0.5 = 0, above 0.9 = 1
-        normalized = max(0.0, min(1.0, (sim - 0.5) / 0.35))
+        normalized = max(0.0, min(1.0, (sim - 0.5) / 0.4))
         return normalized
     # Fallback to Jaccard if embedding fails
     return _text_overlap(text_a, text_b)
@@ -745,7 +741,7 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
     
     dims = {}
     
-    # 1. BPM fidelity ??use best match (direct or half/double time)
+    # 1. BPM fidelity — use best match (direct or half/double time)
     bpm_o = orig_lib.get("bpm", 0) or 0
     bpm_r = repr_lib.get("bpm", 0) or 0
     if bpm_o > 0 and bpm_r > 0:
@@ -777,7 +773,7 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
              (scale_r == "major" and relative_pairs.get(key_r) == key_o):
             dims["key"] = 0.5
         else:
-            # Check semitone distance (within 짹1 semitone = partial match)
+            # Check semitone distance (within ±1 semitone = partial match)
             notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
             alt = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
             ko = alt.get(key_o, key_o)
@@ -791,7 +787,7 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
     else:
         dims["key"] = 0.0
     
-    # 3. Spectral fidelity ??compare centroid, bandwidth, rolloff
+    # 3. Spectral fidelity — compare centroid, bandwidth, rolloff
     spectral_feats = ["spectral_centroid_hz", "spectral_bandwidth_hz", "spectral_rolloff_hz"]
     spec_sims = []
     for feat in spectral_feats:
@@ -806,22 +802,22 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
     dr_r = repr_lib.get("dynamic_range_db", 0) or 0
     dims["dynamics"] = _ratio_similarity(dr_o, dr_r) if dr_o > 0 and dr_r > 0 else 0.0
     
-    # 5. Energy fidelity ??danceability, energy from essentia
+    # 5. Energy fidelity — danceability, energy from essentia
     dance_o = orig_ess.get("danceability", 0) or 0
     dance_r = repr_ess.get("danceability", 0) or 0
     dims["energy"] = _ratio_similarity(dance_o, dance_r) if dance_o > 0 and dance_r > 0 else 0.0
     
-    # 6. Genre fidelity ??Gemini genre text overlap
+    # 6. Genre fidelity — Gemini genre text overlap
     genre_o = orig_gem.get("genre", "") if isinstance(orig_gem, dict) else ""
     genre_r = repr_gem.get("genre", "") if isinstance(repr_gem, dict) else ""
     dims["genre"] = _embedding_similarity(genre_o, genre_r)
     
-    # 7. Mood fidelity ??Gemini mood text overlap
+    # 7. Mood fidelity — Gemini mood text overlap
     mood_o = orig_gem.get("mood", "") if isinstance(orig_gem, dict) else ""
     mood_r = repr_gem.get("mood", "") if isinstance(repr_gem, dict) else ""
     dims["mood"] = _embedding_similarity(mood_o, mood_r)
     
-    # 8. Instrument fidelity ??list overlap
+    # 8. Instrument fidelity — list overlap
     inst_o = orig_gem.get("instruments", []) if isinstance(orig_gem, dict) else []
     inst_r = repr_gem.get("instruments", []) if isinstance(repr_gem, dict) else []
     # Convert lists to comma-joined text for embedding comparison
@@ -868,9 +864,9 @@ def compute_fidelity_score(original: dict, reproduction: dict) -> dict:
     }
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 # SUPABASE HELPERS
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 async def save_to_supabase(data: dict):
     async with httpx.AsyncClient() as client:
         r = await client.post(
@@ -913,18 +909,36 @@ async def update_supabase(analysis_id: int, updates: dict):
         return r.status_code < 300
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
 # ENDPOINTS
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+@app.get("/test-embed")
+async def test_embed():
+    """Debug endpoint: test if Gemini embedding works."""
+    text_a = "progressive house, electronic dance, synth-pop"
+    text_b = "nu-disco, indie dance, electronic pop"
+    try:
+        emb_a = _get_embedding(text_a)
+        emb_b = _get_embedding(text_b)
+        if emb_a and emb_b:
+            sim = _cosine_similarity(emb_a, emb_b)
+            norm = max(0.0, min(1.0, (sim - 0.5) / 0.4))
+            return {"status": "ok", "dim": len(emb_a), "cosine": round(sim, 4), "normalized": round(norm, 4)}
+        else:
+            return {"status": "fail", "error": "empty embeddings", "a_len": len(emb_a), "b_len": len(emb_b)}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "service": "suno-audio-analyzer",
-        "version": "5.3-httpx-embed",
+        "version": "5.2-embedding",
         "modes": {
-            "mode_a": "Prompt + Audio ??Quad Engine ??Claude Opus evaluation",
-            "mode_b": "Audio only ??librosa + Essentia + Gemini Flash ??Reverse prompt prediction"
+            "mode_a": "Prompt + Audio → Quad Engine → Claude Opus evaluation",
+            "mode_b": "Audio only → librosa + Essentia + Gemini Flash → Reverse prompt prediction"
         },
         "engines": {
             "lite": ["librosa", "essentia", GEMINI_FLASH_MODEL],
@@ -935,9 +949,9 @@ async def health():
     }
 
 
-# ????????????????????????????????????????
-# MODE A: Original ??Prompt + Audio ??Full evaluation
-# ????????????????????????????????????????
+# ────────────────────────────────────────
+# MODE A: Original — Prompt + Audio → Full evaluation
+# ────────────────────────────────────────
 @app.post("/analyze")
 async def analyze_upload(
     file: UploadFile = File(...),
@@ -946,7 +960,7 @@ async def analyze_upload(
     prompt_id: str = Form(None),
     ip: str = Form("unknown")
 ):
-    """Mode A: Quad-engine analysis with prompt ??Claude Opus evaluation."""
+    """Mode A: Quad-engine analysis with prompt → Claude Opus evaluation."""
     if not file.content_type or "audio" not in file.content_type:
         raise HTTPException(400, "File must be an audio file (mp3, wav, etc.)")
 
@@ -1024,9 +1038,9 @@ async def analyze_upload(
         raise HTTPException(503, "Server busy. Please try again in a moment.")
 
 
-# ????????????????????????????????????????
-# MODE B: Audio only ??reverse prompt prediction
-# ????????????????????????????????????????
+# ────────────────────────────────────────
+# MODE B: Audio only → reverse prompt prediction
+# ────────────────────────────────────────
 @app.post("/analyze-audio")
 async def analyze_audio_only(
     file: UploadFile = File(...),
@@ -1113,11 +1127,11 @@ async def analyze_audio_only(
 
 
 
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# ════════════════════════════════════════
+# ════════════════════════════════════════
 # MODE C: FIDELITY COMPARISON (Lightweight)
-# Compares two existing analyses by ID ??no audio processing
-# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+# Compares two existing analyses by ID — no audio processing
+# ════════════════════════════════════════
 
 @app.post("/compare")
 async def compare_analyses(
@@ -1127,7 +1141,7 @@ async def compare_analyses(
 ):
     """
     Compare two existing audio analyses by their IDs.
-    No audio processing ??just fetches both from Supabase and computes fidelity.
+    No audio processing — just fetches both from Supabase and computes fidelity.
     
     Workflow:
     1. POST /analyze-audio with original audio -> get original_id
@@ -1207,8 +1221,8 @@ async def compare_analyses(
 
 
 # ADMIN: Re-evaluation of Mode B results
-# (Pro tier ??Gemini Pro + Claude Opus, internal use only)
-# ????????????????????????????????????????
+# (Pro tier — Gemini Pro + Claude Opus, internal use only)
+# ────────────────────────────────────────
 @app.post("/admin/reeval")
 async def admin_reeval(
     analysis_id: int = Form(...),
@@ -1238,7 +1252,7 @@ async def admin_reeval(
     if not predicted_prompt:
         raise HTTPException(400, "No predicted prompt found in this record")
 
-    # NOTE: We don't have the original audio bytes stored ??only the analysis.
+    # NOTE: We don't have the original audio bytes stored — only the analysis.
     # So re-eval uses the stored analysis data + Gemini Flash report as proxy.
     # For a higher-fidelity re-eval, store audio bytes in Supabase Storage (future improvement).
     flash_data = raw_report.get("gemini_flash", {})
@@ -1340,4 +1354,3 @@ async def get_reeval_queue(
         "flagged_count": len(flagged),
         "records": flagged
     }
-
