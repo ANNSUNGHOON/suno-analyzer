@@ -7,7 +7,7 @@ openai==1.58.1
 httpx==0.27.2
 numpy==1.26.4
 librosa==0.10.2
-essentia==2.1b6.dev1111
+essentia
 soundfile==0.12.1
 python-multipart==0.0.12
 torch==2.5.1+cpu
