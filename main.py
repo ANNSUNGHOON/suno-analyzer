@@ -694,7 +694,7 @@ def _embedding_similarity(text_a: str, text_b: str) -> float:
         sim = _cosine_similarity(emb_a, emb_b)
         # Cosine sim range for text embeddings is typically 0.3~1.0
         # Normalize to 0~1: anything below 0.5 = 0, above 0.9 = 1
-        normalized = max(0.0, min(1.0, (sim - 0.5) / 0.4))
+        normalized = max(0.0, min(1.0, (sim - 0.5) / 0.35))
         return normalized
     # Fallback to Jaccard if embedding fails
     return _text_overlap(text_a, text_b)
