@@ -527,35 +527,123 @@ async def run_claude_reeval(predicted_prompt: str, librosa_data: dict, essentia_
 
 
 def compute_data_quality_score(librosa_data: dict, essentia_data: dict, gemini_flash: dict) -> float:
-    """Heuristic quality score (0-10) to decide if re-eval is worthwhile."""
+    """
+    Quality score (0-10) with three scoring axes:
+    1. Continuous value scaling (not just boolean existence)
+    2. Cross-engine validation penalties (librosa vs essentia disagreement)
+    3. Gemini analysis depth differentiation
+    """
     score = 0.0
 
-    # librosa quality
+    # -- AXIS 1: Continuous value scoring (max ~5.0) --
+
+    # librosa: BPM presence + duration quality (max 1.5)
     if librosa_data.get("bpm") and librosa_data["bpm"] > 0:
-        score += 1.5
-    if librosa_data.get("key"):
-        score += 1.0
-    if librosa_data.get("duration_seconds", 0) > 30:
         score += 0.5
-
-    # essentia quality
-    if essentia_data.get("key_strength", 0) and essentia_data["key_strength"] > 0.5:
-        score += 1.5
-    if essentia_data.get("danceability") is not None:
-        score += 0.5
-    if not essentia_data.get("error"):
-        score += 0.5
-
-    # gemini flash quality
-    if isinstance(gemini_flash, dict):
-        if gemini_flash.get("genre") and gemini_flash["genre"].lower() not in ["unknown", "error", ""]:
-            score += 1.5
-        if gemini_flash.get("analysis_confidence", 0) >= 7:
-            score += 1.5
-        if gemini_flash.get("instruments") and len(gemini_flash["instruments"]) > 1:
+        dur = librosa_data.get("duration_seconds", 0)
+        if dur > 120:
             score += 0.5
+        elif dur > 60:
+            score += 0.3
+        elif dur > 30:
+            score += 0.1
+        dr = librosa_data.get("dynamic_range_db", 0)
+        if dr > 15:
+            score += 0.5
+        elif dr > 8:
+            score += 0.3
+        elif dr > 3:
+            score += 0.1
 
-    return round(min(score, 10.0), 1)
+    # essentia: key strength proportional (max 1.5)
+    ks = essentia_data.get("key_strength", 0) or 0
+    score += min(ks, 1.0) * 1.0
+    if essentia_data.get("danceability") is not None and not essentia_data.get("error"):
+        score += 0.5
+
+    # gemini confidence proportional (max 2.0)
+    if isinstance(gemini_flash, dict) and not gemini_flash.get("error"):
+        conf = gemini_flash.get("analysis_confidence", 0) or 0
+        score += min(conf / 10.0, 1.0) * 2.0
+
+    # -- AXIS 2: Cross-engine validation (max +2.0, with penalties) --
+
+    # BPM agreement: librosa vs essentia
+    bpm_l = librosa_data.get("bpm", 0) or 0
+    bpm_e = essentia_data.get("bpm", 0) or 0
+    if bpm_l > 0 and bpm_e > 0:
+        bpm_ratio = min(bpm_l, bpm_e) / max(bpm_l, bpm_e)
+        bpm_ratio_half = min(bpm_l, bpm_e * 2) / max(bpm_l, bpm_e * 2) if bpm_e > 0 else 0
+        bpm_ratio_dbl = min(bpm_l * 2, bpm_e) / max(bpm_l * 2, bpm_e) if bpm_l > 0 else 0
+        best_ratio = max(bpm_ratio, bpm_ratio_half, bpm_ratio_dbl)
+        if best_ratio > 0.95:
+            score += 1.0
+        elif best_ratio > 0.85:
+            score += 0.5
+        else:
+            score -= 0.5
+
+    # Key agreement: librosa vs essentia
+    key_l = librosa_data.get("key", "")
+    key_e = essentia_data.get("key", "")
+    scale_l = librosa_data.get("scale", "")
+    scale_e = essentia_data.get("scale", "")
+    if key_l and key_e:
+        relative_pairs = {
+            "C": "A", "G": "E", "D": "B", "A": "F#", "E": "C#", "B": "G#",
+            "F": "D", "Bb": "G", "Eb": "C", "Ab": "F", "Db": "Bb", "Gb": "Eb",
+            "F#": "D#", "C#": "A#"
+        }
+        same_key = (key_l == key_e)
+        relative_match = False
+        if not same_key:
+            if scale_l == "major" and scale_e == "minor":
+                relative_match = relative_pairs.get(key_l) == key_e
+            elif scale_l == "minor" and scale_e == "major":
+                relative_match = relative_pairs.get(key_e) == key_l
+        if same_key and scale_l == scale_e:
+            score += 1.0
+        elif same_key or relative_match:
+            score += 0.5
+        else:
+            score -= 0.3
+
+    # -- AXIS 3: Gemini analysis depth (max +3.0) --
+
+    if isinstance(gemini_flash, dict) and not gemini_flash.get("error"):
+        genre_str = gemini_flash.get("genre", "") or ""
+        mood_str = gemini_flash.get("mood", "") or ""
+        instruments = gemini_flash.get("instruments", []) or []
+        vocal = gemini_flash.get("vocal_type", "") or ""
+        prod = gemini_flash.get("production_style", "") or ""
+
+        # Genre specificity (max 1.0)
+        genre_tokens = [t.strip() for t in genre_str.replace("/", ",").replace("-", " ").split(",") if t.strip()]
+        if len(genre_tokens) >= 3:
+            score += 1.0
+        elif len(genre_tokens) == 2:
+            score += 0.7
+        elif len(genre_tokens) == 1 and genre_str.lower() not in ["unknown", "error", ""]:
+            score += 0.3
+
+        # Instrument detail (max 1.0)
+        n_inst = len(instruments)
+        if n_inst >= 4:
+            score += 1.0
+        elif n_inst >= 2:
+            score += 0.6
+        elif n_inst == 1:
+            score += 0.2
+
+        # Analysis completeness: vocal + production + mood (max 1.0)
+        completeness = sum([
+            1 if vocal and vocal.lower() not in ["none", "n/a", ""] else 0,
+            1 if prod and prod.lower() not in ["unknown", ""] else 0,
+            1 if len(mood_str.split(",")) >= 2 else 0,
+        ])
+        score += completeness / 3.0 * 1.0
+
+    return round(max(0.0, min(score, 10.0)), 1)
 
 
 # ════════════════════════════════════════
