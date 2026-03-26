@@ -1060,101 +1060,98 @@ async def analyze_audio_only(
 
 
 # ════════════════════════════════════════
-# MODE C: FIDELITY COMPARISON
-# Compare original audio vs Suno reproduction
+# ════════════════════════════════════════
+# MODE C: FIDELITY COMPARISON (Lightweight)
+# Compares two existing analyses by ID — no audio processing
 # ════════════════════════════════════════
 
 @app.post("/compare")
-async def compare_audio(
-    original_file: UploadFile = File(None),
-    reproduction_file: UploadFile = File(...),
-    original_analysis_id: int = Form(None),
+async def compare_analyses(
+    original_id: int = Form(...),
+    reproduction_id: int = Form(...),
     label: str = Form("")
 ):
     """
-    Compare original audio analysis vs Suno reproduction.
-    Two modes:
-    1. original_analysis_id -> fetch from Supabase, analyze only reproduction
-    2. original_file -> analyze both from scratch
-    Returns fidelity score (0-10) with per-dimension breakdown.
+    Compare two existing audio analyses by their IDs.
+    No audio processing — just fetches both from Supabase and computes fidelity.
+    
+    Workflow:
+    1. POST /analyze-audio with original audio -> get original_id
+    2. Generate reproduction in Suno using predicted_prompt
+    3. POST /analyze-audio with Suno output -> get reproduction_id
+    4. POST /compare with both IDs -> get fidelity score
     """
-    async with analysis_semaphore:
-        try:
-            if original_analysis_id:
-                record = await fetch_from_supabase(original_analysis_id)
-                if not record:
-                    raise HTTPException(404, f"Analysis {original_analysis_id} not found")
-                raw = json.loads(record.get("gemini_report", "{}"))
-                original_data = {
-                    "librosa": raw.get("librosa", {}),
-                    "essentia": raw.get("essentia", {}),
-                    "gemini_flash": raw.get("gemini_flash", {}),
-                    "predicted_prompt": raw.get("predicted", {})
-                }
-            elif original_file:
-                ob = await original_file.read()
-                original_data = {
-                    "librosa": analyze_with_librosa(ob),
-                    "essentia": analyze_with_essentia(ob),
-                    "gemini_flash": await analyze_with_gemini_flash(ob)
-                }
-            else:
-                raise HTTPException(400, "Provide original_file or original_analysis_id")
-
-            rb = await reproduction_file.read()
-            reproduction_data = {
-                "librosa": analyze_with_librosa(rb),
-                "essentia": analyze_with_essentia(rb),
-                "gemini_flash": await analyze_with_gemini_flash(rb)
-            }
-
-            fidelity = compute_fidelity_score(original_data, reproduction_data)
-
-            compare_result = {
-                "ip": "",
-                "original_prompt": original_data.get("predicted_prompt", {}).get("predicted_prompt", label),
-                "gemini_report": json.dumps({
-                    "comparison_type": "fidelity",
-                    "original": original_data,
-                    "reproduction": reproduction_data,
-                    "fidelity": fidelity
-                }),
-                "analysis_mode": "fidelity_compare",
-                "prompt_type": "comparison",
-                "overall_score": fidelity["fidelity_score"],
-            }
-            saved = await save_to_supabase(compare_result)
-            sid = saved[0].get("id") if saved and isinstance(saved, list) else None
-
-            og = original_data.get("gemini_flash", {})
-            rg = reproduction_data.get("gemini_flash", {})
-            return {
-                "mode": "fidelity_compare",
-                "fidelity": fidelity,
-                "original_summary": {
-                    "bpm": original_data.get("librosa", {}).get("bpm"),
-                    "key": original_data.get("essentia", {}).get("key", original_data.get("librosa", {}).get("key")),
-                    "genre": og.get("genre") if isinstance(og, dict) else None,
-                },
-                "reproduction_summary": {
-                    "bpm": reproduction_data["librosa"].get("bpm"),
-                    "key": reproduction_data["essentia"].get("key", reproduction_data["librosa"].get("key")),
-                    "genre": rg.get("genre") if isinstance(rg, dict) else None,
-                },
-                "predicted_prompt_used": original_data.get("predicted_prompt", {}).get("predicted_prompt", ""),
-                "comparison_id": sid,
-                "label": label
-            }
-        except asyncio.TimeoutError:
-            raise HTTPException(503, "Server busy.")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(500, f"Compare failed: {str(e)}")
+    try:
+        # Fetch both analyses from Supabase
+        original_rec = await fetch_from_supabase(original_id)
+        if not original_rec:
+            raise HTTPException(404, f"Original analysis {original_id} not found")
+        
+        reproduction_rec = await fetch_from_supabase(reproduction_id)
+        if not reproduction_rec:
+            raise HTTPException(404, f"Reproduction analysis {reproduction_id} not found")
+        
+        # Parse stored analysis data
+        orig_raw = json.loads(original_rec.get("gemini_report", "{}"))
+        repr_raw = json.loads(reproduction_rec.get("gemini_report", "{}"))
+        
+        original_data = {
+            "librosa": orig_raw.get("librosa", {}),
+            "essentia": orig_raw.get("essentia", {}),
+            "gemini_flash": orig_raw.get("gemini_flash", {}),
+            "predicted_prompt": orig_raw.get("predicted", {})
+        }
+        reproduction_data = {
+            "librosa": repr_raw.get("librosa", {}),
+            "essentia": repr_raw.get("essentia", {}),
+            "gemini_flash": repr_raw.get("gemini_flash", {}),
+        }
+        
+        # Compute fidelity score
+        fidelity = compute_fidelity_score(original_data, reproduction_data)
+        
+        # Save comparison to Supabase
+        compare_result = {
+            "ip": "",
+            "original_prompt": original_data.get("predicted_prompt", {}).get("predicted_prompt", label),
+            "gemini_report": json.dumps({
+                "comparison_type": "fidelity",
+                "original_id": original_id,
+                "reproduction_id": reproduction_id,
+                "fidelity": fidelity
+            }),
+            "analysis_mode": "fidelity_compare",
+            "prompt_type": "comparison",
+            "overall_score": fidelity["fidelity_score"],
+        }
+        saved = await save_to_supabase(compare_result)
+        sid = saved[0].get("id") if saved and isinstance(saved, list) else None
+        
+        og = original_data.get("gemini_flash", {})
+        rg = reproduction_data.get("gemini_flash", {})
+        return {
+            "mode": "fidelity_compare",
+            "fidelity": fidelity,
+            "original_summary": {
+                "bpm": original_data["librosa"].get("bpm"),
+                "key": original_data.get("essentia", {}).get("key", original_data["librosa"].get("key")),
+                "genre": og.get("genre") if isinstance(og, dict) else None,
+            },
+            "reproduction_summary": {
+                "bpm": reproduction_data["librosa"].get("bpm"),
+                "key": reproduction_data.get("essentia", {}).get("key", reproduction_data["librosa"].get("key")),
+                "genre": rg.get("genre") if isinstance(rg, dict) else None,
+            },
+            "predicted_prompt_used": original_data.get("predicted_prompt", {}).get("predicted_prompt", ""),
+            "comparison_id": sid,
+            "label": label
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Compare failed: {str(e)}")
 
 
-
-# ────────────────────────────────────────
 # ADMIN: Re-evaluation of Mode B results
 # (Pro tier — Gemini Pro + Claude Opus, internal use only)
 # ────────────────────────────────────────
