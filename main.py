@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 import anthropic
@@ -1574,3 +1575,95 @@ async def get_reeval_queue(
         "flagged_count": len(flagged),
         "records": flagged
     }
+
+
+# ────────────────────────────────────────
+# BATCH: Server-side CDN download + Mode A analyze
+# ────────────────────────────────────────
+class BatchTrack(BaseModel):
+    id: str
+    audio_url: str
+    style_prompt: str
+    model_version: str = "v5"
+    title: str = ""
+
+class BatchRequest(BaseModel):
+    tracks: list[BatchTrack]
+    suno_token: str
+    admin_key: str = ""
+
+@app.post("/batch-analyze")
+async def batch_analyze(req: BatchRequest):
+    """Server-side batch: Railway downloads from CDN + runs Mode A analysis."""
+    if ADMIN_KEY and req.admin_key != ADMIN_KEY:
+        raise HTTPException(403, "Invalid admin_key")
+
+    results = []
+    sem = asyncio.Semaphore(1)
+
+    async def process_one(track: BatchTrack):
+        async with sem:
+            try:
+                async with httpx.AsyncClient(timeout=60) as dl:
+                    r = await dl.get(
+                        track.audio_url,
+                        headers={"Authorization": req.suno_token},
+                        follow_redirects=True
+                    )
+                    if r.status_code != 200:
+                        results.append({"id": track.id, "status": "dl_failed", "code": r.status_code})
+                        return
+                    audio_bytes = r.content
+
+                try:
+                    librosa_result = analyze_with_librosa(audio_bytes)
+                except Exception as e:
+                    librosa_result = {"engine": "librosa", "error": str(e)}
+                try:
+                    essentia_result = analyze_with_essentia(audio_bytes)
+                except Exception as e:
+                    essentia_result = {"engine": "essentia", "error": str(e)}
+                try:
+                    gemini_raw = await run_gemini(audio_bytes, "audio/mpeg")
+                    gemini_report = extract_json(gemini_raw)
+                except Exception as e:
+                    gemini_report = json.dumps({"engine": "gemini", "error": str(e)})
+                try:
+                    gpt4o_raw = await run_gpt4o(audio_bytes, "audio/mpeg")
+                    gpt4o_report = extract_json(gpt4o_raw)
+                except Exception as e:
+                    gpt4o_report = json.dumps({"engine": "gpt4o", "error": str(e)})
+                try:
+                    claude_eval = await run_claude(track.style_prompt, librosa_result, essentia_result, gemini_report, gpt4o_report)
+                except Exception as e:
+                    claude_eval = {"overall_score": None, "summary": str(e)}
+
+                full_report = json.dumps({
+                    "librosa": librosa_result,
+                    "essentia": essentia_result,
+                    "gemini": json.loads(gemini_report) if gemini_report.startswith("{") else gemini_report,
+                    "gpt4o": json.loads(gpt4o_report) if gpt4o_report.startswith("{") else gpt4o_report
+                })
+                db_result = {
+                    "original_prompt": track.style_prompt,
+                    "gemini_report": full_report,
+                    "genre_accuracy": claude_eval.get("genre_accuracy"),
+                    "bpm_accuracy": claude_eval.get("bpm_accuracy"),
+                    "instrument_accuracy": claude_eval.get("instrument_accuracy"),
+                    "mood_accuracy": claude_eval.get("mood_accuracy"),
+                    "structure_accuracy": claude_eval.get("structure_accuracy"),
+                    "overall_score": claude_eval.get("overall_score"),
+                    "prompt_type": "style",
+                    "analysis_mode": "prompt_eval",
+                    "model_version": track.model_version
+                }
+                await save_to_supabase(db_result)
+                results.append({"id": track.id, "status": "ok", "overall_score": claude_eval.get("overall_score")})
+            except Exception as e:
+                results.append({"id": track.id, "status": "error", "error": str(e)})
+            await asyncio.sleep(2)
+
+    await asyncio.gather(*[process_one(t) for t in req.tracks])
+    ok = sum(1 for r in results if r.get("status") == "ok")
+    return {"total": len(req.tracks), "success": ok, "results": results}
+
