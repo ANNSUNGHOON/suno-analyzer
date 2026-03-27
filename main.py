@@ -55,12 +55,20 @@ def analyze_with_librosa(audio_bytes: bytes) -> dict:
         y, sr = librosa.load(tmp_path, sr=22050, mono=True)
         duration = librosa.get_duration(y=y, sr=sr)
 
-        # BPM
+        # BPM — with half-time correction
         tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
         if isinstance(tempo, np.ndarray):
             tempo = float(tempo[0])
         else:
             tempo = float(tempo)
+        # librosa often doubles BPM for slow/mid-tempo tracks (e.g. 75 BPM → 150 BPM)
+        # Heuristic: if tempo > 140 and half-tempo is in common range (60-120), prefer half
+        tempo_raw = tempo
+        tempo_half = tempo / 2
+        if tempo > 140 and 55 <= tempo_half <= 130:
+            tempo = tempo_half
+        # Store both for analysis
+        tempo_corrected = tempo
 
         # Key via chroma
         chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
@@ -100,7 +108,8 @@ def analyze_with_librosa(audio_bytes: bytes) -> dict:
 
         return {
             "engine": "librosa",
-            "bpm": round(tempo, 1),
+            "bpm": round(tempo_corrected, 1),
+            "bpm_raw": round(tempo_raw, 1),
             "key": detected_key,
             "scale": scale,
             "key_full": f"{detected_key} {scale}",
