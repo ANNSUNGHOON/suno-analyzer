@@ -12,7 +12,7 @@ import numpy as np
 import asyncio
 import base64
 
-app = FastAPI(title="Suno Audio Analyzer v5 — Quad Engine + Mode B")
+app = FastAPI(title="Suno Audio Analyzer v7.2 — Quad Engine + RAG")
 
 MAX_CONCURRENT = 2
 analysis_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
@@ -413,6 +413,28 @@ def extract_m2d_embedding(audio_bytes: bytes) -> dict:
         os.unlink(tmp_path)
 
 
+def extract_clap_embedding_only(audio_bytes: bytes) -> list:
+    """Extract raw 512-dim CLAP audio embedding. Reuses cached model."""
+    import torch
+    import librosa as lr
+    try:
+        model = _load_clap()
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+        try:
+            y, _ = lr.load(tmp_path, sr=48000, mono=True)
+            audio_data = y.reshape(1, -1)
+            with torch.no_grad():
+                embed = model.get_audio_embedding_from_data(audio_data, use_tensor=True)
+            return embed.cpu().squeeze().numpy().tolist()
+        finally:
+            os.unlink(tmp_path)
+    except Exception as e:
+        print(f"[WARN] CLAP embedding extraction failed: {e}")
+        return []
+
+
 # ════════════════════════════════════════
 # Gemini Embedding 2 — Text Embedding (upgraded)
 # ════════════════════════════════════════
@@ -712,17 +734,35 @@ async def run_gemini_flash(audio_bytes: bytes, mime_type: str = "audio/mpeg") ->
     return response.text
 
 
-async def run_reverse_prompt(librosa_data: dict, essentia_data: dict, gemini_flash_data: str) -> dict:
-    """Predict Suno prompt from audio analysis using Claude Sonnet 4.6."""
+async def run_reverse_prompt(librosa_data: dict, essentia_data: dict, gemini_flash_data: str, few_shot_examples: list = None) -> dict:
+    """Predict Suno prompt from audio analysis using Claude Sonnet 4.6.
+    few_shot_examples: RAG 검색 결과 (유사 케이스 프롬프트 참고용)
+    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     prompt_text = REVERSE_PROMPT_TEMPLATE.format(
         librosa_data=json.dumps(librosa_data, indent=2),
         essentia_data=json.dumps(essentia_data, indent=2),
         gemini_data=gemini_flash_data
     )
+    # RAG few-shot 주입
+    if few_shot_examples:
+        examples_lines = []
+        for i, ex in enumerate(few_shot_examples[:3]):
+            sim = ex.get("similarity", 0)
+            prompt_str = ex.get("original_prompt", "")
+            score = ex.get("overall_score")
+            score_str = f", score={score}" if score is not None else ""
+            examples_lines.append(f"  [{i+1}] (similarity={sim:.2f}{score_str}) \"{prompt_str}\"")
+        few_shot_block = (
+            "\n\n<reference_cases>\n"
+            "Similar audio cases from history (use as style reference for token selection):\n"
+            + "\n".join(examples_lines) +
+            "\n</reference_cases>"
+        )
+        prompt_text = prompt_text + few_shot_block
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=600,
+        max_tokens=700,
         messages=[{"role": "user", "content": prompt_text}]
     )
     raw = extract_json(response.content[0].text)
@@ -974,6 +1014,30 @@ async def update_supabase(analysis_id: int, updates: dict):
         return r.status_code < 300
 
 
+async def find_similar_by_m2d(embedding: list, top_k: int = 3) -> list:
+    """pgvector HNSW 검색: M2D 임베딩 기준 유사 케이스 top-k 반환."""
+    if not embedding:
+        return []
+    try:
+        vec_str = "[" + ",".join(f"{v:.6f}" for v in embedding) + "]"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/find_similar_audio",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={"query_embedding": vec_str, "match_count": top_k}
+            )
+        if r.status_code < 300:
+            return r.json()
+        return []
+    except Exception as e:
+        print(f"[WARN] RAG lookup failed: {e}")
+        return []
+
+
 # ════════════════════════════════════════
 # ENDPOINTS
 # ════════════════════════════════════════
@@ -1006,7 +1070,8 @@ async def analyze_upload(
     prompt: str = Form(...),
     prompt_type: str = Form("style"),
     prompt_id: str = Form(None),
-    ip: str = Form("unknown")
+    ip: str = Form("unknown"),
+    model_version: str = Form("v5")
 ):
     """Mode A: Quad-engine analysis with prompt → Claude Opus evaluation."""
     if not file.content_type or "audio" not in file.content_type:
@@ -1069,7 +1134,8 @@ async def analyze_upload(
                 "structure_accuracy": claude_eval.get("structure_accuracy"),
                 "overall_score": claude_eval.get("overall_score"),
                 "prompt_type": prompt_type,
-                "analysis_mode": "prompt_eval"
+                "analysis_mode": "prompt_eval",
+                "model_version": model_version
             }
             await save_to_supabase(db_result)
 
@@ -1131,16 +1197,39 @@ async def analyze_audio_only(
                 flash_report = {"error": str(e)}
                 flash_report_str = json.dumps(flash_report)
 
-            # Engine 4: CLAP music tagger (MTT zero-shot — replaces PANNs)
+            # Engine 4: CLAP music tagger (MTT zero-shot) + embedding 추출 병렬 실행
             loop = asyncio.get_event_loop()
             try:
-                clap_tagger_result = await loop.run_in_executor(None, score_clap_music_tagger, audio_bytes, "")
+                clap_tagger_result, clap_embed = await asyncio.gather(
+                    loop.run_in_executor(None, score_clap_music_tagger, audio_bytes, ""),
+                    loop.run_in_executor(None, extract_clap_embedding_only, audio_bytes),
+                )
             except Exception as e:
                 clap_tagger_result = {"engine": "clap_tagger", "error": str(e)}
+                clap_embed = []
 
-            # Reverse prompt prediction
+            # Engine 5: M2D embedding 추출
             try:
-                predicted = await run_reverse_prompt(librosa_result, essentia_result, flash_report_str)
+                m2d_result = await loop.run_in_executor(None, extract_m2d_embedding, audio_bytes)
+                m2d_embed = m2d_result.get("embedding", [])
+            except Exception as e:
+                m2d_result = {"engine": "m2d", "error": str(e)}
+                m2d_embed = []
+
+            # RAG: 유사 케이스 검색 (임베딩 있을 때만)
+            few_shot_examples = []
+            if m2d_embed:
+                try:
+                    few_shot_examples = await find_similar_by_m2d(m2d_embed, top_k=3)
+                except Exception:
+                    few_shot_examples = []
+
+            # Reverse prompt prediction (+ RAG few-shot)
+            try:
+                predicted = await run_reverse_prompt(
+                    librosa_result, essentia_result, flash_report_str,
+                    few_shot_examples=few_shot_examples
+                )
             except Exception as e:
                 predicted = {"predicted_prompt": "", "confidence": 0, "error": str(e)}
 
@@ -1148,7 +1237,7 @@ async def analyze_audio_only(
             quality_score = compute_data_quality_score(librosa_result, essentia_result, flash_report)
             reeval_recommended = quality_score >= REEVAL_SCORE_THRESHOLD
 
-            # Save to Supabase
+            # Save to Supabase (벡터 콼럼 포함)
             db_result = {
                 "ip": ip,
                 "original_prompt": predicted.get("predicted_prompt", ""),
@@ -1157,12 +1246,18 @@ async def analyze_audio_only(
                     "essentia": essentia_result,
                     "gemini_flash": flash_report,
                     "clap_tagger": clap_tagger_result,
+                    "m2d": {"engine": "m2d", "embedding_dim": len(m2d_embed)},
                     "predicted": predicted
                 }),
                 "analysis_mode": "audio_only",
                 "prompt_type": "predicted",
-                "overall_score": None,  # not evaluated yet
+                "overall_score": None,
+                "quality_score": round(quality_score, 2),
             }
+            if m2d_embed:
+                db_result["m2d_embedding"] = "[" + ",".join(f"{v:.6f}" for v in m2d_embed) + "]"
+            if clap_embed:
+                db_result["clap_embedding"] = "[" + ",".join(f"{v:.6f}" for v in clap_embed) + "]"
             saved = await save_to_supabase(db_result)
             saved_id = saved[0].get("id") if saved and isinstance(saved, list) else None
 
@@ -1175,6 +1270,7 @@ async def analyze_audio_only(
                 "predicted_prompt": predicted,
                 "quality_score": quality_score,
                 "reeval_recommended": reeval_recommended,
+                "rag_similar_count": len(few_shot_examples),
                 "analysis_id": saved_id,
                 "label": label
             }
