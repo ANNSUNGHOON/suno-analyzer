@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+﻿from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
@@ -34,7 +34,7 @@ ADMIN_KEY = os.getenv("ADMIN_KEY", "")  # Set this in Railway env vars
 
 # Model config — easy to swap
 GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
-GEMINI_FLASH_MODEL = "gemini-2.5-flash-preview-04-17"  # Lite tier
+GEMINI_FLASH_MODEL = "gemini-2.5-flash"  # Stable GA (replaces expired preview)
 
 # Quality threshold for re-eval recommendation
 REEVAL_SCORE_THRESHOLD = 6.0
