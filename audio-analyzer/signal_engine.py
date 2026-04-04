@@ -42,6 +42,8 @@ try:
         MuQFeatures,
         CrossValidation,
     )
+    from .prism_schema import PrismVector, ObjectiveMetrics
+    from .audio_perception import create_client as create_perception_client
 except ImportError:
     import librosa_analyzer  # type: ignore
     import essentia_analyzer  # type: ignore
@@ -53,6 +55,8 @@ except ImportError:
         MuQFeatures,
         CrossValidation,
     )
+    from prism_schema import PrismVector, ObjectiveMetrics  # type: ignore
+    from audio_perception import create_client as create_perception_client  # type: ignore
 
 # 🛠  Cross-validation thresholds (from existing stage1_signal.py) 🛠
 
@@ -74,17 +78,24 @@ class SignalEngine:
         self,
         enable_muq: bool = True,
         enable_essentia: bool = True,
+        enable_audio_perception: bool = False,
+        perception_provider: str = "gemini",
         genre_labels: Optional[list[str]] = None,
     ) -> None:
         """
         Args:
             enable_muq: Enable MuQ embedding extraction (GPU recommended).
             enable_essentia: Enable Essentia analysis (optional dependency).
+            enable_audio_perception: Enable Layer 2 Audio Perception (API LLM).
+            perception_provider: "gemini" (default) or "qwen".
             genre_labels: Custom genre labels for MuQ-MuLan.
                           Defaults to CLAP_CANDIDATE_LABELS from genre_taxonomy.
         """
         self._enable_muq = enable_muq
         self._enable_essentia = enable_essentia
+        self._enable_audio_perception = enable_audio_perception
+        self._perception_provider = perception_provider
+        self._perception_client = None
         self._genre_labels = genre_labels
 
         # Try loading default genre labels from genre_taxonomy
@@ -171,6 +182,18 @@ class SignalEngine:
                 logger.warning(f"MuQ analysis failed for {track_id}: {e}")
                 result.muq = MuQFeatures(error=str(e))
 
+        # 5) Audio Perception Layer (Layer 2) – optional API LLM
+        if self._enable_audio_perception:
+            try:
+                prism_vector = self._run_audio_perception(audio_path, result)
+                result.prism_vector = prism_vector.to_dict()
+                logger.debug(
+                    f"Audio Perception OK: anchor={prism_vector.analysis.genre.main_anchor}"
+                )
+            except Exception as e:
+                logger.warning(f"Audio Perception failed for {track_id}: {e}")
+                # Non-fatal: L2 failure doesn't break L1 results
+
         result.processing_ms = round((time.perf_counter() - start_time) * 1000, 1)
         result.engine_version = self.VERSION
 
@@ -212,6 +235,28 @@ class SignalEngine:
             logger.info(f"Batch [{i + 1}/{n}]: {path}")
             results.append(self.analyze(path, track_id=tid, prompt_text=prompt))
         return results
+
+    # 🛠  Audio Perception (Layer 2)
+
+    def _run_audio_perception(
+        self, audio_path: str, analysis: TrackAnalysisV2
+    ) -> "PrismVector":
+        """Run Layer 2 Audio Perception — extract closed-label vector via API LLM."""
+        if self._perception_client is None:
+            self._perception_client = create_perception_client(self._perception_provider)
+            logger.info(f"Audio Perception client created: {self._perception_provider}")
+
+        # Build ObjectiveMetrics from L1 results
+        metrics = ObjectiveMetrics(
+            key=analysis.librosa.key or analysis.essentia.key,
+            scale=analysis.essentia.scale,
+            key_strength=analysis.essentia.key_strength,
+            bpm=analysis.librosa.bpm,
+            spectral_centroid=analysis.librosa.spectral_centroid,
+            energy_normalized=analysis.librosa.energy,
+        )
+
+        return self._perception_client.extract(audio_path, metrics)
 
     # 🛠  MuQ Analysis 🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠🛠
 

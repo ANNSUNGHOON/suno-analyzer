@@ -140,6 +140,7 @@ class TrackAnalysisV2(BaseModel):
     essentia: EssentiaFeatures = Field(default_factory=EssentiaFeatures)
     muq: MuQFeatures = Field(default_factory=MuQFeatures)
     cross_validation: CrossValidation = Field(default_factory=CrossValidation)
+    prism_vector: Optional[dict] = None  # Layer 2 Audio Perception output (PrismVector.to_dict())
     processing_ms: float = 0.0
     engine_version: str = "2.0"
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -159,7 +160,7 @@ class TrackAnalysisV2(BaseModel):
 
     def to_dict(self) -> dict:
         """Serialize without embedding (for logging/API)."""
-        return {
+        d = {
             "track_id": self.track_id,
             "audio_path": self.audio_path,
             "librosa": self.librosa.to_dict(),
@@ -170,6 +171,9 @@ class TrackAnalysisV2(BaseModel):
             "engine_version": self.engine_version,
             "created_at": self.created_at,
         }
+        if self.prism_vector is not None:
+            d["prism_vector"] = self.prism_vector
+        return d
 
     def to_dict_full(self) -> dict:
         """Serialize with full embedding (for DB storage)."""
